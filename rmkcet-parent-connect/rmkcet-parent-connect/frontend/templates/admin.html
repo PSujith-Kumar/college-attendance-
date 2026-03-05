@@ -515,7 +515,7 @@
       <tbody>
         {% for m in messages[:100] %}
         <tr>
-          <td>{{ m.counselor_email }}</td>
+          <td>{{ m.counselor_name or m.counselor_email }}</td>
           <td>{{ m.student_name }}</td>
           <td><strong>{{ m.reg_no }}</strong></td>
           <td><span class="badge badge-info">{{ m.format }}</span></td>

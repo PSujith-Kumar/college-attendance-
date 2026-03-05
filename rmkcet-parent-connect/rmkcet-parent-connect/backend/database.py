@@ -770,10 +770,20 @@ def log_message(counselor_email, reg_no, student_name, message, fmt="message",
 def get_message_history(counselor_email=None, limit=100):
     conn = get_conn()
     if counselor_email:
-        rows = conn.execute("SELECT * FROM sent_messages WHERE counselor_email=? ORDER BY sent_at DESC LIMIT ?",
-                            (counselor_email, limit)).fetchall()
+        rows = conn.execute("""
+            SELECT sm.*, u.name as counselor_name 
+            FROM sent_messages sm 
+            LEFT JOIN users u ON sm.counselor_email = u.email 
+            WHERE sm.counselor_email=? 
+            ORDER BY sm.sent_at DESC LIMIT ?
+        """, (counselor_email, limit)).fetchall()
     else:
-        rows = conn.execute("SELECT * FROM sent_messages ORDER BY sent_at DESC LIMIT ?", (limit,)).fetchall()
+        rows = conn.execute("""
+            SELECT sm.*, u.name as counselor_name 
+            FROM sent_messages sm 
+            LEFT JOIN users u ON sm.counselor_email = u.email 
+            ORDER BY sm.sent_at DESC LIMIT ?
+        """, (limit,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
