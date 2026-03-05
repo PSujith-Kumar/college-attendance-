@@ -56,7 +56,8 @@ def init_database():
         is_active BOOLEAN DEFAULT 1,
         is_locked BOOLEAN DEFAULT 0,
         lock_reason TEXT,
-        max_students INTEGER DEFAULT 30
+        max_students INTEGER DEFAULT 30,
+        can_upload_students BOOLEAN DEFAULT 1
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS active_sessions (
@@ -214,6 +215,9 @@ def init_database():
 
     conn.commit()
     conn.close()
+
+    # Run migrations for existing DBs
+    ensure_can_upload_students_column()
     return True
 
 
@@ -266,12 +270,13 @@ def get_all_users():
     return [dict(r) for r in rows]
 
 
-def create_user(email, password, name, role="counselor", department=None, max_students=30):
+def create_user(email, password, name, role="counselor", department=None, max_students=30, can_upload_students=True):
     conn = get_conn()
     try:
-        conn.execute("""INSERT INTO users (email, password_hash, name, role, department, max_students)
-                        VALUES (?,?,?,?,?,?)""",
-                     (email, hash_password(password), name, role, department, max_students))
+        conn.execute("""INSERT INTO users (email, password_hash, name, role, department, max_students, can_upload_students)
+                        VALUES (?,?,?,?,?,?,?)""",
+                     (email, hash_password(password), name, role, department, max_students,
+                      1 if can_upload_students else 0))
         conn.commit()
         return True, "User created"
     except sqlite3.IntegrityError:
@@ -985,4 +990,173 @@ def set_default_format(fmt_id):
     conn.execute("UPDATE format_settings SET default_format=? WHERE id=(SELECT MAX(id) FROM format_settings)",
                  (fmt_type,))
     conn.commit()
+    conn.close()
+
+
+# =========================================================================
+# COUNSELOR ACTIVITY TRACKING
+# =========================================================================
+
+def get_counselor_activity_summary():
+    """Get a summary of each counselor's activity for the admin overview."""
+    conn = get_conn()
+    counselors = conn.execute(
+        "SELECT email, name, department, last_login, last_activity, max_students, can_upload_students "
+        "FROM users WHERE role='counselor' ORDER BY name"
+    ).fetchall()
+
+    result = []
+    for c_row in counselors:
+        email = c_row["email"]
+
+        # Student count
+        student_count = conn.execute(
+            "SELECT COUNT(*) FROM counselor_students WHERE counselor_email=?", (email,)
+        ).fetchone()[0]
+
+        # Students with phone
+        phone_count = conn.execute(
+            "SELECT COUNT(*) FROM counselor_students WHERE counselor_email=? AND parent_phone IS NOT NULL AND parent_phone != ''",
+            (email,)
+        ).fetchone()[0]
+
+        # Tests uploaded (via test_metadata.uploaded_by)
+        tests_uploaded = conn.execute(
+            "SELECT COUNT(DISTINCT tm.test_id) FROM test_metadata tm WHERE tm.uploaded_by=?", (email,)
+        ).fetchone()[0]
+
+        # Total messages sent
+        total_messages = conn.execute(
+            "SELECT COUNT(*) FROM sent_messages WHERE counselor_email=?", (email,)
+        ).fetchone()[0]
+
+        # Messages this week
+        week_messages = conn.execute(
+            "SELECT COUNT(*) FROM sent_messages WHERE counselor_email=? AND sent_at >= DATE('now', '-7 days')",
+            (email,)
+        ).fetchone()[0]
+
+        # Unique students messaged
+        unique_messaged = conn.execute(
+            "SELECT COUNT(DISTINCT reg_no) FROM sent_messages WHERE counselor_email=?", (email,)
+        ).fetchone()[0]
+
+        # Last message sent
+        last_msg_row = conn.execute(
+            "SELECT MAX(sent_at) as last_sent FROM sent_messages WHERE counselor_email=?", (email,)
+        ).fetchone()
+        last_message_at = last_msg_row["last_sent"] if last_msg_row else None
+
+        # Determine work status
+        has_students = student_count > 0
+        has_tests = tests_uploaded > 0
+        has_messages = total_messages > 0
+        if has_students and has_tests and has_messages:
+            work_status = "Complete"
+        elif has_students and has_tests:
+            work_status = "Partial - No Reports Sent"
+        elif has_students:
+            work_status = "Partial - No Tests Uploaded"
+        else:
+            work_status = "Not Started"
+
+        result.append({
+            "email": email,
+            "name": c_row["name"],
+            "department": c_row["department"] or "N/A",
+            "last_login": c_row["last_login"],
+            "last_activity": c_row["last_activity"],
+            "max_students": c_row["max_students"],
+            "can_upload_students": c_row["can_upload_students"],
+            "student_count": student_count,
+            "students_with_phone": phone_count,
+            "tests_uploaded": tests_uploaded,
+            "total_messages": total_messages,
+            "week_messages": week_messages,
+            "unique_students_messaged": unique_messaged,
+            "last_message_at": last_message_at,
+            "work_status": work_status,
+        })
+
+    conn.close()
+    return result
+
+
+def get_counselor_detailed_activity(counselor_email):
+    """Get detailed activity breakdown for a single counselor."""
+    conn = get_conn()
+
+    # Basic info
+    user = conn.execute("SELECT * FROM users WHERE email=?", (counselor_email,)).fetchone()
+    if not user:
+        conn.close()
+        return None
+
+    info = dict(user)
+
+    # Students
+    students = conn.execute(
+        "SELECT * FROM counselor_students WHERE counselor_email=? ORDER BY student_name",
+        (counselor_email,)
+    ).fetchall()
+    info["students"] = [dict(s) for s in students]
+    info["student_count"] = len(students)
+    info["students_with_phone"] = sum(1 for s in students if s["parent_phone"])
+
+    # Tests uploaded
+    tests = conn.execute(
+        "SELECT tm.*, t.test_name as t_name FROM test_metadata tm "
+        "JOIN tests t ON tm.test_id = t.id "
+        "WHERE tm.uploaded_by=? ORDER BY tm.uploaded_at DESC",
+        (counselor_email,)
+    ).fetchall()
+    info["tests"] = [dict(t) for t in tests]
+    info["tests_uploaded"] = len(tests)
+
+    # Messages
+    messages = conn.execute(
+        "SELECT * FROM sent_messages WHERE counselor_email=? ORDER BY sent_at DESC LIMIT 200",
+        (counselor_email,)
+    ).fetchall()
+    info["messages"] = [dict(m) for m in messages]
+    info["total_messages"] = len(messages)
+
+    # Message stats
+    info["messages_today"] = conn.execute(
+        "SELECT COUNT(*) FROM sent_messages WHERE counselor_email=? AND DATE(sent_at)=DATE('now')",
+        (counselor_email,)
+    ).fetchone()[0]
+    info["messages_this_week"] = conn.execute(
+        "SELECT COUNT(*) FROM sent_messages WHERE counselor_email=? AND sent_at >= DATE('now', '-7 days')",
+        (counselor_email,)
+    ).fetchone()[0]
+    info["messages_this_month"] = conn.execute(
+        "SELECT COUNT(*) FROM sent_messages WHERE counselor_email=? AND sent_at >= DATE('now', '-30 days')",
+        (counselor_email,)
+    ).fetchone()[0]
+    info["unique_students_messaged"] = conn.execute(
+        "SELECT COUNT(DISTINCT reg_no) FROM sent_messages WHERE counselor_email=?",
+        (counselor_email,)
+    ).fetchone()[0]
+
+    # Session history
+    sessions = conn.execute(
+        "SELECT login_time, last_activity, logout_reason, is_active "
+        "FROM active_sessions WHERE user_email=? ORDER BY login_time DESC LIMIT 20",
+        (counselor_email,)
+    ).fetchall()
+    info["sessions"] = [dict(s) for s in sessions]
+
+    conn.close()
+    return info
+
+
+def ensure_can_upload_students_column():
+    """Add can_upload_students column if it doesn't exist (migration)."""
+    conn = get_conn()
+    try:
+        conn.execute("SELECT can_upload_students FROM users LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE users ADD COLUMN can_upload_students BOOLEAN DEFAULT 1")
+        conn.commit()
     conn.close()

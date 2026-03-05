@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}{{ app_name }}{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  {% if current_user_email %}
+  <!-- SIDEBAR -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <div class="logo-area">
+        <div class="logo-icon">🎓</div>
+        <div class="logo-text">
+          <span class="logo-title">RMKCET</span>
+          <span class="logo-subtitle">Parent Connect</span>
+        </div>
+      </div>
+      <button class="sidebar-toggle" id="sidebarToggle"><i class="fas fa-bars"></i></button>
+    </div>
+
+    <nav class="sidebar-nav">
+      {% if current_role == 'admin' %}
+      <a href="{{ url_for('admin') }}" class="nav-link {% if request.path == '/admin' %}active{% endif %}">
+        <i class="fas fa-tachometer-alt"></i><span>Dashboard</span>
+      </a>
+      {% else %}
+      <a href="{{ url_for('counselor_page') }}" class="nav-link {% if request.path == '/counselor' %}active{% endif %}">
+        <i class="fas fa-tachometer-alt"></i><span>Dashboard</span>
+      </a>
+      {% endif %}
+    </nav>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar">{{ current_user_name[0] if current_user_name else '?' }}</div>
+        <div class="user-details">
+          <span class="user-name">{{ current_user_name }}</span>
+          <span class="user-role">{{ current_role|title }}</span>
+        </div>
+      </div>
+      <a href="{{ url_for('logout') }}" class="logout-btn"><i class="fas fa-sign-out-alt"></i> Logout</a>
+    </div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main-content" id="mainContent">
+    <!-- HEADER -->
+    <header class="top-header">
+      <button class="mobile-toggle" id="mobileToggle"><i class="fas fa-bars"></i></button>
+      <h1 class="page-title">{% block page_title %}Dashboard{% endblock %}</h1>
+      <div class="header-actions">
+        <span class="header-badge"><i class="fas fa-clock"></i> {{ now.strftime('%d %b %Y, %H:%M') }}</span>
+      </div>
+    </header>
+
+    <!-- FLASH MESSAGES -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <div class="flash-container">
+      {% for cat, msg in messages %}
+      <div class="flash flash-{{ cat }}">
+        <i class="fas {% if cat == 'success' %}fa-check-circle{% elif cat == 'error' %}fa-times-circle{% elif cat == 'warning' %}fa-exclamation-triangle{% else %}fa-info-circle{% endif %}"></i>
+        <span>{{ msg }}</span>
+        <button class="flash-close" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% endwith %}
+
+    <!-- PAGE CONTENT -->
+    <div class="content-area">
+      {% block content %}{% endblock %}
+    </div>
+  </main>
+
+  {% else %}
+  <!-- NO SIDEBAR – login page -->
+  <main class="login-layout">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+    <div class="flash-container" style="position:fixed;top:20px;right:20px;z-index:9999;width:380px;">
+      {% for cat, msg in messages %}
+      <div class="flash flash-{{ cat }}">
+        <i class="fas {% if cat == 'success' %}fa-check-circle{% elif cat == 'error' %}fa-times-circle{% else %}fa-info-circle{% endif %}"></i>
+        <span>{{ msg }}</span>
+        <button class="flash-close" onclick="this.parentElement.remove()"><i class="fas fa-times"></i></button>
+      </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+    {% endwith %}
+    {% block content_login %}{% endblock %}
+  </main>
+  {% endif %}
+
+  <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

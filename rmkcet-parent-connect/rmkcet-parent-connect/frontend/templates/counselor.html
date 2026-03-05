@@ -1,0 +1,314 @@
+{% extends "base.html" %}
+{% block title %}Counselor Dashboard - {{ app_name }}{% endblock %}
+{% block page_title %}Counselor Dashboard{% endblock %}
+
+{% block content %}
+<!-- ============ METRICS ============ -->
+<div class="metrics-grid">
+  <div class="metric-card">
+    <div class="metric-label">My Students</div>
+    <div class="metric-value">{{ students|length }}</div>
+    <div class="metric-icon"><i class="fas fa-user-graduate"></i></div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">Tests Available</div>
+    <div class="metric-value">{{ tests|length }}</div>
+    <div class="metric-icon"><i class="fas fa-clipboard-check"></i></div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">Messages Sent</div>
+    <div class="metric-value">{{ msg_stats.total }}</div>
+    <div class="metric-icon"><i class="fas fa-paper-plane"></i></div>
+  </div>
+  <div class="metric-card">
+    <div class="metric-label">This Week</div>
+    <div class="metric-value">{{ msg_stats.week }}</div>
+    <div class="metric-icon"><i class="fas fa-calendar-week"></i></div>
+  </div>
+</div>
+
+<!-- ============ TABS ============ -->
+<div class="tabs" id="counselorTabs">
+  <button class="tab-btn active" data-tab="mystudents"><i class="fas fa-users"></i> My Students</button>
+  {% if can_upload_students %}
+  <button class="tab-btn" data-tab="uploadstudents"><i class="fas fa-upload"></i> Upload Students</button>
+  {% endif %}
+  <button class="tab-btn" data-tab="uploadmarks"><i class="fas fa-file-excel"></i> Upload Marks</button>
+  <button class="tab-btn" data-tab="sendreports"><i class="fas fa-paper-plane"></i> Send Reports</button>
+  <button class="tab-btn" data-tab="history"><i class="fas fa-history"></i> History</button>
+</div>
+
+<!-- ==================== MY STUDENTS TAB ==================== -->
+<div class="tab-panel active" id="tab-mystudents">
+  {% if students %}
+  <div class="d-flex justify-between align-center flex-wrap mb-2" style="gap:12px;">
+    <h3 class="section-title" style="margin:0"><i class="fas fa-user-graduate"></i> Student List ({{ students|length }})</h3>
+    <div class="btn-group">
+      <button class="btn btn-outline btn-sm" onclick="document.getElementById('searchStudents').focus()">
+        <i class="fas fa-search"></i> Search
+      </button>
+      <form method="POST" action="{{ url_for('api_delete_all_students') }}" style="display:inline"
+            onsubmit="return confirm('Remove ALL students? This cannot be undone.')">
+        <button class="btn btn-danger btn-sm"><i class="fas fa-trash"></i> Remove All</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="form-group" style="max-width:400px;">
+    <input type="text" class="form-control" id="searchStudents" placeholder="Search by name or reg no..."
+           onkeyup="filterStudents()">
+  </div>
+
+  <div class="table-wrapper">
+    <table id="studentTable">
+      <thead>
+        <tr><th>Reg No</th><th>Name</th><th>Department</th><th>Phone</th><th>Email</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for s in students %}
+        <tr class="student-row">
+          <td>{{ s.reg_no }}</td>
+          <td>{{ s.student_name }}</td>
+          <td>{{ s.department or '—' }}</td>
+          <td>{{ s.parent_phone or '—' }}</td>
+          <td style="font-size:.8rem">{{ s.parent_email or '—' }}</td>
+          <td>
+            <form method="POST" action="{{ url_for('api_delete_student', reg_no=s.reg_no) }}" style="display:inline">
+              <button class="btn btn-danger btn-sm btn-icon" title="Remove"><i class="fas fa-times"></i></button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <i class="fas fa-user-graduate"></i>
+    <h3>No Students Yet</h3>
+    <p>Upload a student list to get started.</p>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ==================== UPLOAD STUDENTS TAB ==================== -->
+{% if can_upload_students %}
+<div class="tab-panel" id="tab-uploadstudents">
+  <div class="card" style="max-width:560px;">
+    <div class="card-title"><i class="fas fa-upload"></i> Upload Student List</div>
+    <p style="font-size:.85rem;color:var(--text-dim);margin-bottom:16px;">
+      Upload an Excel file containing your student details. The system will automatically
+      detect columns for Registration Number, Name, Phone, and Email.
+    </p>
+    <form method="POST" action="{{ url_for('api_upload_students') }}" enctype="multipart/form-data">
+      <div class="form-group">
+        <div class="file-input-wrapper">
+          <i class="fas fa-file-excel"></i>
+          <div class="file-text">Drop Excel file here or click to browse</div>
+          <div class="file-name" id="studentFileLabel"></div>
+          <input type="file" name="student_file" accept=".xlsx,.xls" required
+                 onchange="showFileName(this, 'studentFileLabel')">
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary"><i class="fas fa-upload"></i> Upload Students</button>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<!-- ==================== UPLOAD MARKS TAB ==================== -->
+<div class="tab-panel" id="tab-uploadmarks">
+  <div class="card" style="max-width:560px;">
+    <div class="card-title"><i class="fas fa-file-excel"></i> Upload Marks Sheet</div>
+    <p style="font-size:.85rem;color:var(--text-dim);margin-bottom:16px;">
+      Upload the marks Excel file. The intelligent parser will automatically detect
+      test info, subjects, and student marks from the sheet structure.
+    </p>
+    <form method="POST" action="{{ url_for('api_upload_marks') }}" enctype="multipart/form-data">
+      <div class="form-group">
+        <div class="file-input-wrapper">
+          <i class="fas fa-chart-bar"></i>
+          <div class="file-text">Drop marks Excel file here or click to browse</div>
+          <div class="file-name" id="marksFileLabel"></div>
+          <input type="file" name="marks_file" accept=".xlsx,.xls" required
+                 onchange="showFileName(this, 'marksFileLabel')">
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary"><i class="fas fa-upload"></i> Upload Marks</button>
+    </form>
+  </div>
+
+  {% if tests %}
+  <h3 class="section-title mt-3"><i class="fas fa-clipboard-list"></i> Uploaded Tests</h3>
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr><th>Test Name</th><th>Batch</th><th>Semester</th><th>Department</th></tr>
+      </thead>
+      <tbody>
+        {% for t in tests %}
+        <tr>
+          <td><strong>{{ t.test_name or t.t_name or 'Test #' ~ t.id }}</strong></td>
+          <td>{{ t.batch_name or '—' }}</td>
+          <td>{{ t.semester or '—' }}</td>
+          <td>{{ t.department or '—' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+<!-- ==================== SEND REPORTS TAB ==================== -->
+<div class="tab-panel" id="tab-sendreports">
+  {% if tests and students %}
+  <div class="card mb-3" style="max-width:700px;">
+    <div class="card-title"><i class="fas fa-paper-plane"></i> Generate & Send Reports</div>
+    <form method="POST" action="{{ url_for('api_generate_reports') }}">
+      <div class="form-group">
+        <label class="form-label">Select Test</label>
+        <select class="form-control" name="test_id" required>
+          <option value="">-- Select a test --</option>
+          {% for t in tests %}
+          <option value="{{ t.id }}">{{ t.test_name or 'Test #' ~ t.id }} ({{ t.batch_name or '' }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Select Students</label>
+        <div style="max-height:250px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;">
+          <div class="form-check">
+            <input type="checkbox" id="selectAll" onchange="toggleAllStudents(this)">
+            <label for="selectAll" style="font-weight:700;color:var(--primary)">Select All</label>
+          </div>
+          <hr class="divider" style="margin:8px 0;">
+          {% for s in students %}
+          <div class="form-check">
+            <input type="checkbox" name="reg_nos" value="{{ s.reg_no }}" id="stu-{{ loop.index }}" class="student-check">
+            <label for="stu-{{ loop.index }}">{{ s.student_name }} ({{ s.reg_no }})</label>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Format</label>
+        <select class="form-control" name="format">
+          <option value="message">💬 WhatsApp Message</option>
+          <option value="pdf">📄 PDF Report</option>
+        </select>
+      </div>
+      <button type="submit" class="btn btn-primary"><i class="fas fa-paper-plane"></i> Generate Reports</button>
+    </form>
+  </div>
+  {% elif not tests %}
+  <div class="empty-state">
+    <i class="fas fa-chart-bar"></i>
+    <h3>No Tests Uploaded</h3>
+    <p>Upload a marks sheet first to generate reports.</p>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <i class="fas fa-user-graduate"></i>
+    <h3>No Students</h3>
+    <p>Upload a student list first.</p>
+  </div>
+  {% endif %}
+
+  <!-- Display generated reports -->
+  {% set reports = session.get('reports', []) %}
+  {% if reports %}
+  <h3 class="section-title mt-3"><i class="fas fa-check-circle text-success"></i> Generated Reports</h3>
+  {% for r in reports %}
+  <div class="report-card">
+    <h4>{{ r.name }} <span style="font-size:.8rem;color:var(--text-dim)">({{ r.reg_no }})</span></h4>
+    <div class="report-marks">
+      {% for subj, mark in r.marks.items() %}
+      <span class="mark-chip">{{ subj }}: <strong>{{ mark }}</strong></span>
+      {% endfor %}
+    </div>
+    <div class="btn-group">
+      {% if r.whatsapp_link %}
+      <a href="{{ r.whatsapp_link }}" target="_blank" class="wa-btn">
+        <i class="fab fa-whatsapp"></i> Send via WhatsApp
+      </a>
+      {% endif %}
+      {% if session.get('report_test_id') %}
+      <a href="{{ url_for('api_student_pdf', reg_no=r.reg_no, test_id=session.get('report_test_id')) }}"
+         class="btn btn-outline btn-sm"><i class="fas fa-file-pdf"></i> Download PDF</a>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  {% endif %}
+</div>
+
+<!-- ==================== HISTORY TAB ==================== -->
+<div class="tab-panel" id="tab-history">
+  <h3 class="section-title"><i class="fas fa-history"></i> Message History</h3>
+  {% if msg_history %}
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr><th>Student</th><th>Reg No</th><th>Format</th><th>Sent At</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        {% for m in msg_history %}
+        <tr>
+          <td>{{ m.student_name }}</td>
+          <td><strong>{{ m.reg_no }}</strong></td>
+          <td><span class="badge badge-info">{{ m.format }}</span></td>
+          <td style="font-size:.82rem">{{ (m.sent_at or '')[:19] }}</td>
+          <td><span class="badge badge-success">{{ m.status }}</span></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty-state">
+    <i class="fas fa-envelope-open-text"></i>
+    <h3>No Messages Yet</h3>
+    <p>Generated reports will appear here.</p>
+  </div>
+  {% endif %}
+
+  <!-- Stats cards -->
+  <div class="metrics-grid mt-3">
+    <div class="metric-card">
+      <div class="metric-label">Total Sent</div>
+      <div class="metric-value">{{ msg_stats.total }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Today</div>
+      <div class="metric-value">{{ msg_stats.today }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">This Week</div>
+      <div class="metric-value">{{ msg_stats.week }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Unique Students</div>
+      <div class="metric-value">{{ msg_stats.unique }}</div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function filterStudents() {
+  const q = document.getElementById('searchStudents').value.toLowerCase();
+  document.querySelectorAll('#studentTable tbody .student-row').forEach(row => {
+    const text = row.textContent.toLowerCase();
+    row.style.display = text.includes(q) ? '' : 'none';
+  });
+}
+
+function toggleAllStudents(master) {
+  document.querySelectorAll('.student-check').forEach(cb => {
+    cb.checked = master.checked;
+  });
+}
+</script>
+{% endblock %}
