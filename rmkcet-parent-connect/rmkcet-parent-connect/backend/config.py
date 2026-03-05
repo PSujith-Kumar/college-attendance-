@@ -92,24 +92,16 @@ ALLOWED_FORMATS = ["message", "pdf", "image"]
 BULK_FORMAT = "same_as_individual"
 
 # === Message Template ===
-MESSAGE_TEMPLATE = """🎓 *{app_name} - Academic Progress Report*
+MESSAGE_TEMPLATE = """Dear Parent :  The Following is the {test_name} Marks Secured in each Course by your son/daughter
 
-📋 *Reg No:* {reg_no}
-👤 *Name:* {student_name}
-🏛️ *Dept:* {department}
-📅 *Test:* {test_name}
+REGISTER NUMBER :  {reg_no}
+NAME : {student_name}
 
-📊 *Subject Marks:*
 {subjects_table}
 
-👨‍🏫 *Counselor:* {counselor_name}
-
-🏛️ *Regards,*
-*PRINCIPAL*
-*RMKCET*
-
----
-🔄 Auto-generated on {date}
+Regards
+PRINCIPAL
+RMKCET
 """
 
 # === Default Admin ===

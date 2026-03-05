@@ -18,9 +18,8 @@ class TemplateEngine:
         for subject in subjects:
             code = subject.get('code', '')
             name = subject.get('name', '')
-            emoji = subject.get('emoji', '📘')
             mark = marks.get(code, marks.get(name, 'N/A'))
-            lines.append(f"{emoji} {name:<{width}}: {mark}")
+            lines.append(f"{name} :\t{mark}")
         return "\n".join(lines)
 
     @staticmethod
@@ -28,7 +27,7 @@ class TemplateEngine:
         """Format marks dict as simple text table."""
         lines = []
         for subj, mark in marks.items():
-            lines.append(f"📘 {subj}: {mark}")
+            lines.append(f"{subj} :\t{mark}")
         return "\n".join(lines) if lines else "No marks available"
 
     @staticmethod
