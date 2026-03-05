@@ -3,9 +3,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 .venv/
+venv/
 .env
 *.xlsx
 *.xls
+*.db
+*.db.backup
+*.sqlite3
 
 # Node
 node_modules/
