@@ -1,6 +1,0 @@
-services:
-  - type: web
-    name: college-attendance-api
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn server:app

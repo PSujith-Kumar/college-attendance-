@@ -1,8 +1,0 @@
-flask
-flask-cors
-pandas
-openpyxl
-twilio
-SpeechRecognition
-pyttsx3
-gunicorn
