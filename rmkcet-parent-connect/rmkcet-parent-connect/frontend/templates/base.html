@@ -8,6 +8,30 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  
+  <!-- Dynamic Theme Colors from Configuration -->
+  {% if app_config %}
+  <style>
+    :root {
+      --primary: {{ app_config.color_primary|default('#667eea') }};
+      --primary-d: {{ app_config.color_primary_dark|default('#5a6fd6') }};
+      --secondary: {{ app_config.color_secondary|default('#764ba2') }};
+      --accent: {{ app_config.color_accent|default('#a78bfa') }};
+      --success: {{ app_config.color_success|default('#25D366') }};
+      --warning: {{ app_config.color_warning|default('#f59e0b') }};
+      --danger: {{ app_config.color_danger|default('#ef4444') }};
+      --info: {{ app_config.color_info|default('#3b82f6') }};
+      --bg-primary: {{ app_config.color_bg_primary|default('#0a0c14') }};
+      --bg-secondary: {{ app_config.color_bg_secondary|default('#0f1219') }};
+      --bg-card: {{ app_config.color_bg_card|default('rgba(20, 30, 50, 0.65)') }};
+      --text: {{ app_config.color_text|default('#e2e8f0') }};
+      --text-dim: {{ app_config.color_text_dim|default('#94a3b8') }};
+      --text-muted: {{ app_config.color_text_muted|default('#64748b') }};
+      --border: {{ app_config.color_border|default('rgba(102, 126, 234, 0.18)') }};
+    }
+  </style>
+  {% endif %}
+  
   {% block head %}{% endblock %}
 </head>
 <body>

@@ -93,6 +93,7 @@ def init_database():
     c.execute('''CREATE TABLE IF NOT EXISTS sent_messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         counselor_email TEXT NOT NULL,
+        test_id INTEGER,
         reg_no TEXT NOT NULL,
         student_name TEXT NOT NULL,
         message TEXT,
@@ -103,7 +104,8 @@ def init_database():
         whatsapp_link TEXT,
         error_message TEXT,
         session_id TEXT,
-        FOREIGN KEY (counselor_email) REFERENCES users(email)
+        FOREIGN KEY (counselor_email) REFERENCES users(email),
+        FOREIGN KEY (test_id) REFERENCES tests(id)
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS batches (
@@ -217,6 +219,7 @@ def init_database():
     conn.close()
 
     # Run migrations for existing DBs
+    ensure_sent_messages_test_id_column()
     ensure_can_upload_students_column()
     return True
 
@@ -246,10 +249,14 @@ def set_config(key, value):
 # AUTH
 # =========================================================================
 
-def authenticate_user(email: str, password: str):
-    """Return user dict or None."""
+def authenticate_user(identifier: str, password: str):
+    """Return user dict or None. Identifier can be email or name."""
     conn = get_conn()
-    user = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+    # Try by email first
+    user = conn.execute("SELECT * FROM users WHERE email=?", (identifier,)).fetchone()
+    # If not found, try by name (case-insensitive)
+    if not user:
+        user = conn.execute("SELECT * FROM users WHERE LOWER(name)=LOWER(?)", (identifier,)).fetchone()
     conn.close()
     if user and user["password_hash"] == hash_password(password):
         return dict(user)
@@ -374,8 +381,144 @@ def use_reset_token(token):
 # =========================================================================
 # SESSIONS
 # =========================================================================
+# INDUSTRIAL-GRADE SESSION MANAGEMENT
+# =========================================================================
 
-def register_session(session_id, user_email, ip_address=None, user_agent=None):
+import hashlib
+import secrets
+from datetime import datetime, timedelta
+
+
+def generate_session_token():
+    """Generate a cryptographically secure session token."""
+    return secrets.token_urlsafe(32)
+
+
+def generate_session_fingerprint(ip_address, user_agent):
+    """Generate a fingerprint to detect session hijacking attempts."""
+    fingerprint_data = f"{ip_address or 'unknown'}|{(user_agent or 'unknown')[:50]}"
+    return hashlib.sha256(fingerprint_data.encode()).hexdigest()[:16]
+
+
+def get_user_active_session(user_email):
+    """Get active session for a user if any exists."""
+    conn = get_conn()
+    row = conn.execute("""SELECT * FROM active_sessions 
+                          WHERE user_email=? AND is_active=1 
+                          ORDER BY login_time DESC LIMIT 1""", (user_email,)).fetchone()
+    conn.close()
+    if row:
+        d = dict(row)
+        # Add device info
+        try:
+            ua = d.get("user_agent", "")
+            if "Mobile" in ua or "Android" in ua or "iPhone" in ua:
+                d["device_type"] = "Mobile"
+            elif "Tablet" in ua or "iPad" in ua:
+                d["device_type"] = "Tablet"
+            else:
+                d["device_type"] = "Desktop"
+            # Browser detection
+            if "Chrome" in ua:
+                d["browser"] = "Chrome"
+            elif "Firefox" in ua:
+                d["browser"] = "Firefox"
+            elif "Safari" in ua:
+                d["browser"] = "Safari"
+            elif "Edge" in ua:
+                d["browser"] = "Edge"
+            else:
+                d["browser"] = "Unknown"
+        except:
+            d["device_type"] = "Unknown"
+            d["browser"] = "Unknown"
+        return d
+    return None
+
+
+def has_active_session(user_email):
+    """Check if user has an active session on another device."""
+    conn = get_conn()
+    row = conn.execute("""SELECT COUNT(*) as cnt FROM active_sessions 
+                          WHERE user_email=? AND is_active=1""", (user_email,)).fetchone()
+    conn.close()
+    return row["cnt"] > 0 if row else False
+
+
+def validate_session_strict(session_id, ip_address=None, user_agent=None):
+    """
+    Industrial-grade session validation.
+    Returns (is_valid, reason, user_email).
+    """
+    if not session_id:
+        return False, "no_session", None
+    
+    conn = get_conn()
+    row = conn.execute("""
+        SELECT s.*, u.is_active as user_active, u.is_locked
+        FROM active_sessions s
+        JOIN users u ON s.user_email = u.email
+        WHERE s.session_id=?
+    """, (session_id,)).fetchone()
+    
+    if not row:
+        conn.close()
+        return False, "session_not_found", None
+    
+    session = dict(row)
+    
+    # Check if session is still active
+    if not session.get("is_active"):
+        conn.close()
+        logout_reason = session.get("logout_reason", "unknown")
+        return False, f"session_inactive:{logout_reason}", session["user_email"]
+    
+    # Check if user account is still valid
+    if not session.get("user_active"):
+        conn.close()
+        return False, "user_deactivated", session["user_email"]
+    
+    if session.get("is_locked"):
+        conn.close()
+        return False, "user_locked", session["user_email"]
+    
+    # Check session timeout
+    config = get_app_config()
+    timeout_seconds = int(config.get("session_timeout", 1800))
+    last_activity = session.get("last_activity")
+    
+    if last_activity:
+        try:
+            if isinstance(last_activity, str):
+                last_activity = datetime.strptime(last_activity[:19], "%Y-%m-%d %H:%M:%S")
+            if (datetime.now() - last_activity).total_seconds() > timeout_seconds:
+                # Session timed out, mark it as inactive
+                conn.execute("""
+                    UPDATE active_sessions SET is_active=0, logout_reason='session_timeout'
+                    WHERE session_id=?
+                """, (session_id,))
+                conn.commit()
+                conn.close()
+                return False, "session_timeout", session["user_email"]
+        except:
+            pass
+    
+    conn.close()
+    return True, "valid", session["user_email"]
+
+
+def force_logout_by_email(user_email, reason="new_device_login"):
+    """Force logout all sessions for a user (called from new device)."""
+    conn = get_conn()
+    conn.execute("""UPDATE active_sessions SET is_active=0, forced_logout=1, logout_reason=?
+                    WHERE user_email=? AND is_active=1""", (reason, user_email))
+    conn.execute("UPDATE users SET session_id=NULL WHERE email=?", (user_email,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def register_session(session_id, user_email, ip_address=None, user_agent=None, force_logout_others=True):
     """Register new session. Returns (success, message)."""
     allowed, msg = check_user_access(user_email)
     if not allowed:
@@ -384,10 +527,12 @@ def register_session(session_id, user_email, ip_address=None, user_agent=None):
     import uuid
     tab_id = str(uuid.uuid4())
     browser_info = (user_agent or "Unknown")[:100]
+    fingerprint = generate_session_fingerprint(ip_address, user_agent)
     now = datetime.now()
-    # Deactivate old sessions
-    conn.execute("""UPDATE active_sessions SET is_active=0, logout_reason='new_login'
-                    WHERE user_email=? AND is_active=1""", (user_email,))
+    # Deactivate old sessions if force_logout_others is True
+    if force_logout_others:
+        conn.execute("""UPDATE active_sessions SET is_active=0, logout_reason='new_login'
+                        WHERE user_email=? AND is_active=1""", (user_email,))
     conn.execute("""INSERT INTO active_sessions
                     (session_id, user_email, ip_address, user_agent, browser_info, tab_id, login_time, last_activity)
                     VALUES (?,?,?,?,?,?,?,?)""",
@@ -507,6 +652,298 @@ def logout_all_users():
 
 
 # =========================================================================
+# SESSION MONITORING & STATISTICS
+# =========================================================================
+
+def get_session_statistics():
+    """Get comprehensive session monitoring statistics."""
+    conn = get_conn()
+    
+    # Active sessions count
+    active_count = conn.execute("SELECT COUNT(*) FROM active_sessions WHERE is_active=1").fetchone()[0]
+    
+    # Total sessions today
+    today_sessions = conn.execute("""SELECT COUNT(*) FROM active_sessions 
+                                      WHERE DATE(login_time)=DATE('now')""").fetchone()[0]
+    
+    # Average session duration (in minutes)
+    avg_duration = conn.execute("""
+        SELECT AVG((JULIANDAY(COALESCE(last_activity, login_time)) - JULIANDAY(login_time)) * 24 * 60)
+        FROM active_sessions WHERE is_active=0 AND logout_reason IS NOT NULL
+    """).fetchone()[0] or 0
+    
+    # Sessions by logout reason
+    logout_reasons = conn.execute("""
+        SELECT logout_reason, COUNT(*) as cnt 
+        FROM active_sessions 
+        WHERE is_active=0 AND logout_reason IS NOT NULL
+        GROUP BY logout_reason
+    """).fetchall()
+    
+    # Peak concurrent sessions (approximate)
+    peak_sessions = conn.execute("""
+        SELECT MAX(concurrent_count) FROM (
+            SELECT COUNT(*) as concurrent_count 
+            FROM active_sessions 
+            GROUP BY DATE(login_time), strftime('%H', login_time)
+        )
+    """).fetchone()[0] or 0
+    
+    # Forced logouts count
+    forced_logouts = conn.execute("""
+        SELECT COUNT(*) FROM active_sessions WHERE forced_logout=1
+    """).fetchone()[0]
+    
+    # Sessions by device type (based on user_agent)
+    mobile_sessions = conn.execute("""
+        SELECT COUNT(*) FROM active_sessions 
+        WHERE user_agent LIKE '%Mobile%' OR user_agent LIKE '%Android%' OR user_agent LIKE '%iPhone%'
+    """).fetchone()[0]
+    
+    desktop_sessions = conn.execute("""
+        SELECT COUNT(*) FROM active_sessions 
+        WHERE user_agent NOT LIKE '%Mobile%' AND user_agent NOT LIKE '%Android%' AND user_agent NOT LIKE '%iPhone%'
+    """).fetchone()[0]
+    
+    conn.close()
+    
+    return {
+        "active_sessions": active_count,
+        "today_sessions": today_sessions,
+        "avg_duration_minutes": round(avg_duration, 1),
+        "logout_reasons": {r["logout_reason"]: r["cnt"] for r in logout_reasons},
+        "peak_concurrent": peak_sessions,
+        "forced_logouts": forced_logouts,
+        "mobile_sessions": mobile_sessions,
+        "desktop_sessions": desktop_sessions,
+    }
+
+
+def get_session_history(limit=100, user_email=None):
+    """Get session history with detailed information."""
+    conn = get_conn()
+    if user_email:
+        rows = conn.execute("""
+            SELECT s.*, u.name, u.role, u.department
+            FROM active_sessions s
+            LEFT JOIN users u ON s.user_email = u.email
+            WHERE s.user_email=?
+            ORDER BY s.login_time DESC LIMIT ?
+        """, (user_email, limit)).fetchall()
+    else:
+        rows = conn.execute("""
+            SELECT s.*, u.name, u.role, u.department
+            FROM active_sessions s
+            LEFT JOIN users u ON s.user_email = u.email
+            ORDER BY s.login_time DESC LIMIT ?
+        """, (limit,)).fetchall()
+    conn.close()
+    
+    result = []
+    for r in rows:
+        d = dict(r)
+        # Calculate session duration
+        try:
+            login = d.get("login_time", "")
+            last_act = d.get("last_activity", login)
+            if isinstance(login, str) and login:
+                login_dt = datetime.strptime(login[:19], "%Y-%m-%d %H:%M:%S")
+                last_dt = datetime.strptime(last_act[:19], "%Y-%m-%d %H:%M:%S")
+                duration_mins = int((last_dt - login_dt).total_seconds() / 60)
+                d["duration"] = f"{duration_mins}m" if duration_mins < 60 else f"{duration_mins//60}h {duration_mins%60}m"
+        except:
+            d["duration"] = "Unknown"
+        result.append(d)
+    return result
+
+
+def get_user_session_history(user_email, limit=20):
+    """Get session history for a specific user."""
+    return get_session_history(limit=limit, user_email=user_email)
+
+
+# =========================================================================
+# APP CONFIGURATION
+# =========================================================================
+
+def get_app_config():
+    """Get all app configuration settings."""
+    conn = get_conn()
+    rows = conn.execute("SELECT key, value FROM app_config").fetchall()
+    conn.close()
+    config = {r["key"]: r["value"] for r in rows}
+    # Set defaults if not present - ALL customizable colors with proper labels
+    defaults = {
+        # Session Settings
+        "session_timeout": "1800",
+        "allow_concurrent_sessions": "false",
+        "max_concurrent_sessions": "1",
+        "session_monitoring_enabled": "true",
+        "session_heartbeat_interval": "30",
+        
+        # Theme Colors - Primary
+        "color_primary": "#667eea",
+        "color_primary_dark": "#5a6fd6",
+        "color_secondary": "#764ba2",
+        "color_accent": "#a78bfa",
+        
+        # Theme Colors - Semantic
+        "color_success": "#25D366",
+        "color_warning": "#f59e0b",
+        "color_danger": "#ef4444",
+        "color_info": "#3b82f6",
+        
+        # Theme Colors - Background
+        "color_bg_primary": "#0a0c14",
+        "color_bg_secondary": "#0f1219",
+        "color_bg_card": "rgba(20, 30, 50, 0.65)",
+        
+        # Theme Colors - Text
+        "color_text": "#e2e8f0",
+        "color_text_dim": "#94a3b8",
+        "color_text_muted": "#64748b",
+        
+        # Theme Colors - Borders
+        "color_border": "rgba(102, 126, 234, 0.18)",
+    }
+    for key, default_val in defaults.items():
+        if key not in config:
+            config[key] = default_val
+    return config
+
+
+def update_app_config(key, value):
+    """Update a single app config setting."""
+    conn = get_conn()
+    conn.execute("""INSERT INTO app_config (key, value, updated_at) VALUES (?,?,?)
+                    ON CONFLICT(key) DO UPDATE SET value=?, updated_at=?""",
+                 (key, str(value), datetime.now(), str(value), datetime.now()))
+    conn.commit()
+    conn.close()
+
+
+def update_app_config_bulk(settings: dict):
+    """Update multiple app config settings at once."""
+    conn = get_conn()
+    for key, value in settings.items():
+        conn.execute("""INSERT INTO app_config (key, value, updated_at) VALUES (?,?,?)
+                        ON CONFLICT(key) DO UPDATE SET value=?, updated_at=?""",
+                     (key, str(value), datetime.now(), str(value), datetime.now()))
+    conn.commit()
+    conn.close()
+
+
+def get_session_timeout():
+    """Get session timeout value from config."""
+    config = get_app_config()
+    try:
+        return int(config.get("session_timeout", 1800))
+    except:
+        return 1800
+
+
+# =========================================================================
+# COUNSELOR SUBMISSIONS HISTORY
+# =========================================================================
+
+def get_counselor_submissions(counselor_email, limit=50):
+    """Get a counselor's test upload history."""
+    conn = get_conn()
+    rows = conn.execute("""
+     SELECT tm.*, t.test_name as t_name, t.id as test_id,
+         COALESCE(tm.semester, s.semester_number) as semester,
+         COALESCE(tm.batch_name, b.name) as batch_name,
+         COALESCE(tm.department, '') as department,
+         COALESCE(tm.test_name, t.test_name) as test_name,
+               (SELECT COUNT(DISTINCT sm.reg_no) FROM student_marks sm WHERE sm.test_id = t.id) as student_count
+        FROM test_metadata tm
+        JOIN tests t ON tm.test_id = t.id
+     LEFT JOIN semesters s ON t.semester_id = s.id
+     LEFT JOIN batches b ON s.batch_id = b.id
+        WHERE tm.uploaded_by = ?
+        ORDER BY tm.uploaded_at DESC
+        LIMIT ?
+    """, (counselor_email, limit)).fetchall()
+    conn.close()
+    
+    result = []
+    for r in rows:
+        d = dict(r)
+        # Parse subjects JSON
+        try:
+            d["subjects_list"] = json.loads(d.get("subjects", "[]"))
+        except:
+            d["subjects_list"] = []
+        result.append(d)
+    return result
+
+
+def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=None, filter_counselor=None):
+    """Get unique uploaded tests, keeping latest per logical test key."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT t.id, t.test_name as t_name, t.test_date,
+               tm.id as tm_id, tm.test_id, tm.test_name, tm.batch_name, tm.semester,
+               tm.department, tm.uploaded_at, tm.uploaded_by, tm.subjects,
+               u.name as uploaded_by_name,
+               (SELECT COUNT(DISTINCT sm.reg_no) FROM student_marks sm WHERE sm.test_id = t.id) as student_count,
+               0 as is_duplicate
+        FROM tests t
+        LEFT JOIN test_metadata tm ON tm.test_id = t.id
+        LEFT JOIN users u ON tm.uploaded_by = u.email
+        ORDER BY COALESCE(tm.uploaded_at, t.test_date) DESC, t.id DESC
+    """).fetchall()
+    conn.close()
+
+    seen = set()
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["test_id"] = d.get("test_id") or d.get("id")
+
+        # Apply filters safely on normalized values.
+        batch_val = str(d.get("batch_name") or "")
+        sem_val = str(d.get("semester") or "")
+        dept_val = str(d.get("department") or "")
+        counselor_val = str(d.get("uploaded_by") or "")
+        if filter_batch and batch_val != str(filter_batch):
+            continue
+        if filter_semester and sem_val != str(filter_semester):
+            continue
+        if filter_dept and dept_val != str(filter_dept):
+            continue
+        if filter_counselor and counselor_val != str(filter_counselor):
+            continue
+
+        try:
+            d["subjects"] = json.loads(d.get("subjects") or "[]")
+        except Exception:
+            d["subjects"] = []
+
+        if not d.get("test_name"):
+            d["test_name"] = d.get("t_name") or f"Test #{d.get('id')}"
+
+        key = (
+            (d.get("test_name") or "").strip().lower(),
+            batch_val.strip().lower(),
+            sem_val.strip().lower(),
+            dept_val.strip().lower(),
+        )
+
+        # If no metadata fields exist, use concrete test id to avoid collapsing unrelated rows.
+        if not any(key):
+            key = (f"id:{d.get('id')}", "", "", "")
+
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(d)
+
+    result.sort(key=lambda x: ((x.get("test_name") or "").lower(), (x.get("uploaded_at") or "")), reverse=False)
+    return result
+
+
+# =========================================================================
 # DEPARTMENTS
 # =========================================================================
 
@@ -618,6 +1055,57 @@ def delete_all_students(counselor_email):
     conn.close()
 
 
+def update_student(counselor_email, reg_no, student_name=None, department=None, parent_phone=None, parent_email=None):
+    """Update a single student under a counselor."""
+    conn = get_conn()
+    sets = []
+    vals = []
+    if student_name is not None:
+        sets.append("student_name=?")
+        vals.append(student_name)
+    if department is not None:
+        sets.append("department=?")
+        vals.append(department)
+    if parent_phone is not None:
+        sets.append("parent_phone=?")
+        vals.append(parent_phone)
+    if parent_email is not None:
+        sets.append("parent_email=?")
+        vals.append(parent_email)
+
+    if not sets:
+        conn.close()
+        return False
+
+    vals.extend([counselor_email, reg_no])
+    conn.execute(
+        f"UPDATE counselor_students SET {','.join(sets)} WHERE counselor_email=? AND reg_no=?",
+        vals,
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def admin_upsert_student(counselor_email, reg_no, student_name, department="", parent_phone="", parent_email=""):
+    """Admin-facing upsert for counselor student records."""
+    conn = get_conn()
+    conn.execute(
+        """INSERT INTO counselor_students
+           (counselor_email, reg_no, student_name, department, parent_phone, parent_email)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(counselor_email, reg_no)
+           DO UPDATE SET student_name=excluded.student_name,
+                         department=excluded.department,
+                         parent_phone=excluded.parent_phone,
+                         parent_email=excluded.parent_email""",
+        (counselor_email, reg_no, student_name, department, parent_phone, parent_email),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
 def search_students(counselor_email, query):
     conn = get_conn()
     q = f"%{query}%"
@@ -627,6 +1115,61 @@ def search_students(counselor_email, query):
                         (counselor_email, q, q, q, q)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_latest_test_id_for_counselor(counselor_email):
+    """Return latest uploaded test id for counselor, or None."""
+    conn = get_conn()
+    row = conn.execute(
+        "SELECT test_id FROM test_metadata WHERE uploaded_by=? ORDER BY uploaded_at DESC LIMIT 1",
+        (counselor_email,),
+    ).fetchone()
+    conn.close()
+    return int(row["test_id"]) if row and row.get("test_id") is not None else None
+
+
+def update_test_metadata_fields(test_id, test_name=None, semester=None, department=None, batch_name=None):
+    """Allow edits to parsed test metadata before sending reports."""
+    conn = get_conn()
+    sets = []
+    vals = []
+    if test_name is not None:
+        sets.append("test_name=?")
+        vals.append(test_name)
+    if semester is not None:
+        sets.append("semester=?")
+        vals.append(semester)
+    if department is not None:
+        sets.append("department=?")
+        vals.append(department)
+    if batch_name is not None:
+        sets.append("batch_name=?")
+        vals.append(batch_name)
+
+    if sets:
+        vals.append(test_id)
+        conn.execute(f"UPDATE test_metadata SET {','.join(sets)} WHERE test_id=?", vals)
+        conn.commit()
+    conn.close()
+    return True
+
+
+def get_sent_reg_nos_for_test(counselor_email, test_id):
+    """Get already-sent student reg numbers for a counselor/test."""
+    conn = get_conn()
+    rows = conn.execute(
+        "SELECT DISTINCT reg_no FROM sent_messages WHERE counselor_email=? AND test_id=?",
+        (counselor_email, test_id),
+    ).fetchall()
+    conn.close()
+    return {r["reg_no"] for r in rows}
+
+
+def get_pending_students_for_test(counselor_email, test_id):
+    """Get counselor students who have not been sent report for this test."""
+    students = get_students(counselor_email)
+    sent = get_sent_reg_nos_for_test(counselor_email, test_id)
+    return [s for s in students if s.get("reg_no") not in sent]
 
 
 # =========================================================================
@@ -752,17 +1295,62 @@ def get_student_marks_for_reg(test_id, reg_no):
     return {r["subject_name"]: r["marks"] for r in rows}
 
 
+def get_test_marks_grouped(test_id):
+    """Get test marks grouped by student with all subjects in columns."""
+    conn = get_conn()
+    
+    # Get all marks for this test
+    rows = conn.execute("""
+        SELECT DISTINCT reg_no, subject_name, marks, department
+        FROM student_marks WHERE test_id = ?
+        ORDER BY reg_no, subject_name
+    """, (test_id,)).fetchall()
+    
+    # Get subjects list from metadata
+    meta = conn.execute("SELECT subjects FROM test_metadata WHERE test_id = ?", (test_id,)).fetchone()
+    conn.close()
+    
+    subjects = []
+    if meta and meta["subjects"]:
+        try:
+            subjects = json.loads(meta["subjects"])
+        except:
+            pass
+    
+    # If no subjects in metadata, extract from marks
+    if not subjects:
+        subjects = list(set(r["subject_name"] for r in rows if r["subject_name"]))
+        subjects.sort()
+    
+    # Group by student
+    students = {}
+    for r in rows:
+        reg = r["reg_no"]
+        if reg not in students:
+            students[reg] = {
+                "reg_no": reg,
+                "department": r["department"] or "",
+                "marks": {}
+            }
+        students[reg]["marks"][r["subject_name"]] = r["marks"]
+    
+    return {
+        "subjects": subjects,
+        "students": list(students.values())
+    }
+
+
 # =========================================================================
 # MESSAGES
 # =========================================================================
 
 def log_message(counselor_email, reg_no, student_name, message, fmt="message",
-                whatsapp_link=None, session_id=None):
+                     whatsapp_link=None, session_id=None, test_id=None):
     conn = get_conn()
     conn.execute("""INSERT INTO sent_messages
-                    (counselor_email, reg_no, student_name, message, format, whatsapp_link, session_id)
-                    VALUES (?,?,?,?,?,?,?)""",
-                 (counselor_email, reg_no, student_name, message, fmt, whatsapp_link, session_id))
+                          (counselor_email, test_id, reg_no, student_name, message, format, whatsapp_link, session_id)
+                          VALUES (?,?,?,?,?,?,?,?)""",
+                      (counselor_email, test_id, reg_no, student_name, message, fmt, whatsapp_link, session_id))
     conn.commit()
     conn.close()
 
@@ -877,12 +1465,18 @@ def get_students_by_counselor(counselor_email):
 def get_tests_by_counselor(counselor_email):
     """Get tests that have marks uploaded by this counselor."""
     conn = get_conn()
-    # Tests may be linked via test_metadata.uploaded_by or just return all tests
-    rows = conn.execute("""SELECT DISTINCT t.id, t.test_name,
-                           tm.semester, tm.department, tm.batch_name
-                           FROM tests t
-                           LEFT JOIN test_metadata tm ON t.id = tm.test_id
-                           ORDER BY t.id DESC""").fetchall()
+    rows = conn.execute("""
+        SELECT DISTINCT t.id,
+               COALESCE(tm.test_name, t.test_name) as test_name,
+               COALESCE(tm.semester, '') as semester,
+               COALESCE(tm.department, '') as department,
+               COALESCE(tm.batch_name, '') as batch_name,
+               tm.uploaded_at
+        FROM tests t
+        LEFT JOIN test_metadata tm ON t.id = tm.test_id
+        WHERE tm.uploaded_by = ?
+        ORDER BY tm.uploaded_at DESC, t.id DESC
+    """, (counselor_email,)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1170,3 +1764,135 @@ def ensure_can_upload_students_column():
         conn.execute("ALTER TABLE users ADD COLUMN can_upload_students BOOLEAN DEFAULT 1")
         conn.commit()
     conn.close()
+
+
+def ensure_sent_messages_test_id_column():
+    """Add test_id to sent_messages if missing (migration)."""
+    conn = get_conn()
+    try:
+        conn.execute("SELECT test_id FROM sent_messages LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE sent_messages ADD COLUMN test_id INTEGER")
+        conn.commit()
+    conn.close()
+
+
+# =========================================================================
+# TEST MANAGEMENT (ADMIN)
+# =========================================================================
+
+def get_all_tests_with_details(filter_batch=None, filter_semester=None, filter_dept=None, filter_counselor=None):
+    """Get all tests with enriched details including duplicate detection."""
+    conn = get_conn()
+    
+    # Build query
+    query = """
+        SELECT t.id, t.test_name as t_name, t.test_date, t.max_marks,
+               tm.test_name, tm.batch_name, tm.semester, tm.department, 
+               tm.uploaded_at, tm.uploaded_by, tm.subjects,
+               u.name as uploaded_by_name,
+               (SELECT COUNT(DISTINCT sm.reg_no) FROM student_marks sm WHERE sm.test_id = t.id) as student_count
+        FROM tests t
+        LEFT JOIN test_metadata tm ON t.id = tm.test_id
+        LEFT JOIN users u ON tm.uploaded_by = u.email
+        WHERE 1=1
+    """
+    params = []
+    
+    if filter_batch:
+        query += " AND tm.batch_name = ?"
+        params.append(filter_batch)
+    if filter_semester:
+        query += " AND tm.semester = ?"
+        params.append(filter_semester)
+    if filter_dept:
+        query += " AND tm.department = ?"
+        params.append(filter_dept)
+    if filter_counselor:
+        query += " AND tm.uploaded_by = ?"
+        params.append(filter_counselor)
+    
+    query += " ORDER BY tm.uploaded_at DESC"
+    
+    rows = conn.execute(query, params).fetchall()
+    
+    tests = []
+    # Track potential duplicates: same test_name + batch + semester + department
+    seen = {}
+    
+    for r in rows:
+        test = dict(r)
+        # Parse subjects JSON
+        try:
+            test["subjects"] = json.loads(test.get("subjects") or "[]")
+        except:
+            test["subjects"] = []
+        
+        # Use t_name if test_name from metadata is missing
+        if not test["test_name"]:
+            test["test_name"] = test.get("t_name", f"Test #{test['id']}")
+        
+        # Duplicate detection key
+        dup_key = f"{test.get('test_name', '')}|{test.get('batch_name', '')}|{test.get('semester', '')}|{test.get('department', '')}"
+        
+        if dup_key in seen and dup_key != "|||":
+            # This is a duplicate
+            test["is_duplicate"] = True
+            # Mark the earlier one also as duplicate
+            if not seen[dup_key].get("marked_dup"):
+                seen[dup_key]["is_duplicate"] = True
+                seen[dup_key]["marked_dup"] = True
+        else:
+            test["is_duplicate"] = False
+            seen[dup_key] = test
+        
+        tests.append(test)
+    
+    conn.close()
+    return tests
+
+
+def delete_test(test_id):
+    """Delete a test and all its associated marks."""
+    conn = get_conn()
+    conn.execute("DELETE FROM student_marks WHERE test_id = ?", (test_id,))
+    conn.execute("DELETE FROM test_metadata WHERE test_id = ?", (test_id,))
+    conn.execute("DELETE FROM tests WHERE id = ?", (test_id,))
+    conn.commit()
+    conn.close()
+    return True
+
+
+def cleanup_duplicate_tests():
+    """Remove duplicate test uploads, keeping only the most recent one."""
+    conn = get_conn()
+    
+    # Find duplicates: same test_name, batch, semester, department
+    duplicates = conn.execute("""
+        SELECT test_name, batch_name, semester, department, 
+               GROUP_CONCAT(test_id) as test_ids,
+               COUNT(*) as cnt
+        FROM test_metadata
+        GROUP BY test_name, batch_name, semester, department
+        HAVING cnt > 1
+    """).fetchall()
+    
+    deleted_count = 0
+    
+    for dup in duplicates:
+        test_ids = [int(x) for x in dup["test_ids"].split(",")]
+        
+        # Keep the most recent (highest ID), delete others
+        test_ids_sorted = sorted(test_ids, reverse=True)
+        keep_id = test_ids_sorted[0]
+        delete_ids = test_ids_sorted[1:]
+        
+        for tid in delete_ids:
+            conn.execute("DELETE FROM student_marks WHERE test_id = ?", (tid,))
+            conn.execute("DELETE FROM test_metadata WHERE test_id = ?", (tid,))
+            conn.execute("DELETE FROM tests WHERE id = ?", (tid,))
+            deleted_count += 1
+    
+    conn.commit()
+    conn.close()
+    return deleted_count

@@ -41,44 +41,18 @@ db.init_database()
 
 
 # ---------------------------------------------------------------------------
-# Auth helpers - Industrial-grade session validation
+# Auth helpers
 # ---------------------------------------------------------------------------
 def login_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
         if "user_email" not in session:
             return redirect(url_for("login"))
-        
         sid = session.get("session_id", "")
-        
-        # Use industrial-grade session validation
-        is_valid, reason, user_email = db.validate_session_strict(
-            sid, 
-            request.remote_addr, 
-            request.user_agent.string
-        )
-        
-        if not is_valid:
+        if not db.validate_session(sid):
             session.clear()
-            # Provide user-friendly messages based on reason
-            if "session_timeout" in reason:
-                flash("Your session has expired due to inactivity. Please log in again.", "warning")
-            elif "session_inactive" in reason:
-                if "new_login" in reason or "new_device" in reason:
-                    flash("You have been logged out because you logged in from another device.", "warning")
-                elif "admin_action" in reason:
-                    flash("An administrator has logged you out.", "warning")
-                else:
-                    flash("Your session is no longer valid. Please log in again.", "error")
-            elif reason == "user_deactivated":
-                flash("Your account has been deactivated. Contact an administrator.", "error")
-            elif reason == "user_locked":
-                flash("Your account is locked. Contact an administrator.", "error")
-            else:
-                flash("Session expired. Please log in again.", "error")
+            flash("Session expired. Please log in again.", "error")
             return redirect(url_for("login"))
-        
-        # Update session activity (heartbeat)
         db.touch_session(sid)
         return f(*args, **kwargs)
     return decorated
@@ -121,35 +95,18 @@ def index():
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if request.method == "POST":
-        identifier = request.form.get("identifier", "").strip()  # Can be email or name
+        email = request.form.get("email", "").strip()
         password = request.form.get("password", "")
-        force_logout = request.form.get("force_logout") == "true"
 
-        user = db.authenticate_user(identifier, password)
+        user = db.authenticate_user(email, password)
         if not user:
-            flash("Invalid email/name or password.", "error")
+            flash("Invalid email or password.", "error")
             return render_template("login.html")
 
-        email = user["email"]
         allowed, msg = db.check_user_access(email)
         if not allowed:
             flash(msg, "error")
             return render_template("login.html")
-
-        # Check for existing active session on another device
-        if not force_logout:
-            existing_session = db.get_user_active_session(email)
-            if existing_session:
-                # Return with session conflict info
-                return render_template("login.html", 
-                    session_conflict=True,
-                    existing_session=existing_session,
-                    stored_identifier=identifier,
-                    stored_password=password)
-
-        # Force logout existing sessions if requested
-        if force_logout:
-            db.force_logout_by_email(email, "new_device_login")
 
         sid = str(uuid.uuid4())
         ok, msg = db.register_session(sid, email, request.remote_addr, request.user_agent.string)
@@ -190,35 +147,8 @@ def admin():
     format_settings = db.get_format_settings()
     messages = db.get_message_history(limit=200)
     msg_stats = db.get_message_stats()
-    
-    # App configuration
-    app_config = db.get_app_config()
-    
-    # Session monitoring statistics
-    session_stats = db.get_session_statistics()
-    session_history = db.get_session_history(limit=100)
-
-    # Test results filters
-    filter_batch = request.args.get("filter_batch")
-    filter_semester = request.args.get("filter_semester")
-    filter_dept = request.args.get("filter_dept")
-    filter_counselor = request.args.get("filter_counselor")
-    
-    all_tests = db.get_all_unique_tests(
-        filter_batch=filter_batch,
-        filter_semester=filter_semester,
-        filter_dept=filter_dept,
-        filter_counselor=filter_counselor
-    )
-    
-    # Get unique batches for filter dropdown
-    batches = sorted(set(t.get("batch_name") for t in all_tests if t.get("batch_name")))
-    
-    # Keep parity with previous template context
-    unique_tests = all_tests
 
     counselors = [u for u in users if u["role"] == "counselor"]
-    students_map = {c["email"]: db.get_students(c["email"]) for c in counselors}
     return render_template(
         "admin.html",
         users=users,
@@ -231,13 +161,6 @@ def admin():
         counselor_count=len(counselors),
         active_counselor_count=sum(1 for c in counselors if c["is_active"]),
         session_count=len(active_sessions),
-        all_tests=all_tests,
-        unique_tests=unique_tests,
-        batches=batches,
-        app_config=app_config,
-        session_stats=session_stats,
-        session_history=session_history,
-        students_map=students_map,
     )
 
 
@@ -256,19 +179,6 @@ def counselor_page():
     tests = db.get_tests_by_counselor(email)
     msg_stats = db.get_message_stats(email)
     msg_history = db.get_message_history(email, limit=50)
-    
-    # Get counselor's previous marksheet submissions
-    submissions = db.get_counselor_submissions(email, limit=50)
-
-    # Send-flow state (selected test and pending students)
-    selected_test_id = request.args.get("test_id", type=int)
-    valid_ids = {int(t.get("id")) for t in tests if t.get("id") is not None}
-    if selected_test_id not in valid_ids:
-        selected_test_id = int(tests[0]["id"]) if tests else None
-
-    selected_test_meta = db.get_test_metadata(selected_test_id) if selected_test_id else None
-    pending_students = db.get_pending_students_for_test(email, selected_test_id) if selected_test_id else students
-    sent_reg_nos = db.get_sent_reg_nos_for_test(email, selected_test_id) if selected_test_id else set()
 
     return render_template(
         "counselor.html",
@@ -277,11 +187,6 @@ def counselor_page():
         tests=tests,
         msg_stats=msg_stats,
         msg_history=msg_history,
-        submissions=submissions,
-        selected_test_id=selected_test_id,
-        selected_test_meta=selected_test_meta,
-        pending_students=pending_students,
-        sent_count=(len(sent_reg_nos) if selected_test_id else 0),
         can_upload_students=bool(user.get("can_upload_students", 1)),
     )
 
@@ -298,28 +203,12 @@ def api_create_user():
     password = request.form.get("password", "")
     name = request.form.get("name", "").strip()
     role = request.form.get("role", "counselor")
-    department = request.form.get("department", "").strip()
-    max_students_raw = request.form.get("max_students", "30")
+    department = request.form.get("department", "")
+    max_students = int(request.form.get("max_students", 30))
     can_upload = request.form.get("can_upload_students") == "on"
-
-    try:
-        max_students = int(max_students_raw)
-    except (TypeError, ValueError):
-        flash("Max students must be a valid number.", "error")
-        return redirect(url_for("admin"))
-
-    if max_students < 1 or max_students > 500:
-        flash("Max students must be between 1 and 500.", "error")
-        return redirect(url_for("admin"))
-
-    role = role if role in {"admin", "counselor"} else "counselor"
 
     if not email or not password or not name:
         flash("All required fields must be filled.", "error")
-        return redirect(url_for("admin"))
-
-    if len(password) < 6:
-        flash("Password must be at least 6 characters.", "error")
         return redirect(url_for("admin"))
 
     ok, msg = db.create_user(email, password, name, role, department, max_students, can_upload)
@@ -423,66 +312,6 @@ def api_force_logout(email):
     return redirect(url_for("admin"))
 
 
-@app.route("/api/admin/students/save", methods=["POST"])
-@login_required
-@admin_required
-def api_admin_save_student():
-    counselor_email = request.form.get("counselor_email", "").strip()
-    original_reg_no = request.form.get("original_reg_no", "").strip()
-    reg_no = request.form.get("reg_no", "").strip()
-    student_name = request.form.get("student_name", "").strip()
-    department = request.form.get("department", "").strip()
-    parent_phone = request.form.get("parent_phone", "").strip()
-    parent_email = request.form.get("parent_email", "").strip()
-
-    if not counselor_email or not reg_no or not student_name:
-        flash("Counselor, Register No and Student Name are required.", "error")
-        return redirect(url_for("admin", tab="users"))
-
-    counselor = db.get_user(counselor_email)
-    if not counselor or counselor.get("role") != "counselor":
-        flash("Invalid counselor selected.", "error")
-        return redirect(url_for("admin", tab="users"))
-
-    try:
-        if original_reg_no and original_reg_no != reg_no:
-            db.delete_student(counselor_email, original_reg_no)
-
-        db.admin_upsert_student(
-            counselor_email,
-            reg_no,
-            student_name,
-            department=department,
-            parent_phone=parent_phone,
-            parent_email=parent_email,
-        )
-        flash(f"Student {reg_no} saved for {counselor.get('name')}", "success")
-    except Exception as e:
-        flash(f"Could not save student: {e}", "error")
-
-    return redirect(url_for("admin", tab="users"))
-
-
-@app.route("/api/admin/students/delete", methods=["POST"])
-@login_required
-@admin_required
-def api_admin_delete_student():
-    counselor_email = request.form.get("counselor_email", "").strip()
-    reg_no = request.form.get("reg_no", "").strip()
-
-    if not counselor_email or not reg_no:
-        flash("Counselor and Register No are required.", "error")
-        return redirect(url_for("admin", tab="users"))
-
-    try:
-        db.delete_student(counselor_email, reg_no)
-        flash(f"Deleted student {reg_no}.", "success")
-    except Exception as e:
-        flash(f"Could not delete student: {e}", "error")
-
-    return redirect(url_for("admin", tab="users"))
-
-
 # ---------- Departments -----------------------------------------------------
 
 @app.route("/api/departments", methods=["POST"])
@@ -537,95 +366,6 @@ def api_cleanup_sessions():
 def api_logout_all():
     db.logout_all_users()
     flash("All users logged out.", "success")
-    return redirect(url_for("admin"))
-
-
-# ---------- App Configuration -----------------------------------------------
-
-@app.route("/api/config/update", methods=["POST"])
-@login_required
-@admin_required
-def api_update_config():
-    settings = {}
-    
-    # Session timeout
-    timeout = request.form.get("session_timeout")
-    if timeout:
-        try:
-            settings["session_timeout"] = str(int(timeout))
-        except ValueError:
-            flash("Invalid session timeout value.", "error")
-            return redirect(url_for("admin"))
-    
-    # Heartbeat interval
-    heartbeat = request.form.get("session_heartbeat_interval")
-    if heartbeat:
-        try:
-            settings["session_heartbeat_interval"] = str(int(heartbeat))
-        except ValueError:
-            pass
-    
-    # Hex color settings
-    color_fields = [
-        "color_primary", "color_primary_dark", "color_secondary", "color_accent",
-        "color_success", "color_warning", "color_danger", "color_info",
-        "color_bg_primary", "color_bg_secondary",
-        "color_text", "color_text_dim", "color_text_muted"
-    ]
-    for field in color_fields:
-        value = request.form.get(field)
-        if value and value.startswith("#"):
-            settings[field] = value
-
-    # Advanced color fields that may use rgba()/hex formats
-    advanced_color_fields = ["color_bg_card", "color_border"]
-    for field in advanced_color_fields:
-        value = request.form.get(field)
-        if value:
-            settings[field] = value.strip()
-    
-    # Session monitoring settings
-    session_monitoring = request.form.get("session_monitoring_enabled")
-    settings["session_monitoring_enabled"] = "true" if session_monitoring == "on" else "false"
-    
-    allow_concurrent = request.form.get("allow_concurrent_sessions")
-    settings["allow_concurrent_sessions"] = "true" if allow_concurrent == "on" else "false"
-    
-    max_concurrent = request.form.get("max_concurrent_sessions")
-    if max_concurrent:
-        settings["max_concurrent_sessions"] = str(max_concurrent)
-    
-    if settings:
-        db.update_app_config_bulk(settings)
-        flash("Configuration updated successfully.", "success")
-    
-    return redirect(url_for("admin"))
-
-
-@app.route("/api/config/reset-theme", methods=["POST"])
-@login_required
-@admin_required
-def api_reset_theme():
-    # Reset all color settings to defaults
-    defaults = {
-        "color_primary": "#667eea",
-        "color_primary_dark": "#5a6fd6",
-        "color_secondary": "#764ba2",
-        "color_accent": "#a78bfa",
-        "color_success": "#25D366",
-        "color_warning": "#f59e0b",
-        "color_danger": "#ef4444",
-        "color_info": "#3b82f6",
-        "color_bg_primary": "#0a0c14",
-        "color_bg_secondary": "#0f1219",
-        "color_bg_card": "rgba(20, 30, 50, 0.65)",
-        "color_text": "#e2e8f0",
-        "color_text_dim": "#94a3b8",
-        "color_text_muted": "#64748b",
-        "color_border": "rgba(102, 126, 234, 0.18)"
-    }
-    db.update_app_config_bulk(defaults)
-    flash("All theme colors reset to defaults.", "success")
     return redirect(url_for("admin"))
 
 
@@ -800,54 +540,6 @@ def api_delete_all_students():
     return redirect(url_for("counselor_page"))
 
 
-# ---------- Tests (Admin) ---------------------------------------------------
-
-@app.route("/api/tests/<int:test_id>/delete", methods=["POST"])
-@login_required
-@admin_required
-def api_delete_test(test_id):
-    try:
-        db.delete_test(test_id)
-        flash("Test deleted successfully.", "success")
-    except Exception as e:
-        flash(f"Failed to delete test: {e}", "error")
-    return redirect(url_for("admin"))
-
-
-@app.route("/api/tests/<int:test_id>/marks")
-@login_required
-def api_get_test_marks(test_id):
-    """Get test marks grouped by student for display."""
-    try:
-        # Access control: admin can view all, counselors can view only their uploads
-        if session.get("role") != "admin":
-            counselor_email = session.get("user_email")
-            allowed_tests = db.get_counselor_submissions(counselor_email, limit=500)
-            allowed_ids = {int(t.get("test_id")) for t in allowed_tests if t.get("test_id") is not None}
-            if test_id not in allowed_ids:
-                return jsonify({"success": False, "error": "Access denied for this test."}), 403
-
-        data = db.get_test_marks_grouped(test_id)
-        return jsonify({"success": True, "data": data})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)})
-
-
-@app.route("/api/tests/cleanup-duplicates", methods=["POST"])
-@login_required
-@admin_required
-def api_tests_cleanup_duplicates():
-    try:
-        deleted_count = db.cleanup_duplicate_tests()
-        if deleted_count > 0:
-            flash(f"Removed {deleted_count} duplicate test(s).", "success")
-        else:
-            flash("No duplicate tests found.", "info")
-    except Exception as e:
-        flash(f"Failed to cleanup duplicates: {e}", "error")
-    return redirect(url_for("admin"))
-
-
 @app.route("/api/marks/upload", methods=["POST"])
 @login_required
 def api_upload_marks():
@@ -877,9 +569,7 @@ def api_upload_marks():
             subjects,
         )
         if ok:
-            latest_test_id = db.get_latest_test_id_for_counselor(email)
             flash(f"Marks uploaded — {len(students)} students, {len(subjects)} subjects.", "success")
-            return redirect(url_for("counselor_page", tab="sendreports", test_id=latest_test_id or ""))
         else:
             flash(f"Error: {msg}", "error")
     except Exception as e:
@@ -895,85 +585,41 @@ def api_generate_reports():
     reg_nos = request.form.getlist("reg_nos")
     fmt = request.form.get("format", "message")
 
-    # Editable parsed fields
-    edited_test_name = request.form.get("edited_test_name", "").strip()
-    edited_semester = request.form.get("edited_semester", "").strip()
-    edited_department = request.form.get("edited_department", "").strip()
-    edited_batch = request.form.get("edited_batch", "").strip()
-    custom_message_body = request.form.get("custom_message_body", "").strip()
-
     if not test_id or not reg_nos:
         flash("Select a test and at least one student.", "error")
-        return redirect(url_for("counselor_page", tab="sendreports", test_id=test_id or ""))
+        return redirect(url_for("counselor_page"))
 
     test_id = int(test_id)
     user = db.get_user(email)
     test_meta = db.get_test_metadata(test_id)
-
-    # Keep metadata editable before send
-    if edited_test_name or edited_semester or edited_department or edited_batch:
-        db.update_test_metadata_fields(
-            test_id,
-            test_name=edited_test_name or (test_meta or {}).get("test_name") or "",
-            semester=edited_semester or (test_meta or {}).get("semester") or "",
-            department=edited_department or (test_meta or {}).get("department") or "",
-            batch_name=edited_batch or (test_meta or {}).get("batch_name") or "",
-        )
-        test_meta = db.get_test_metadata(test_id)
-
     students = db.get_students(email)
     lookup = {s["reg_no"]: s for s in students}
 
     from utils.whatsapp_helper import get_whatsapp_link
     from utils.template_engine import TemplateEngine
 
-    already_sent = db.get_sent_reg_nos_for_test(email, test_id)
     reports = []
     for rn in reg_nos:
-        if rn in already_sent:
-            continue
-
         marks = db.get_student_marks_for_reg(test_id, rn)
         stu = lookup.get(rn, {})
         if not marks:
             continue
 
-        marks_table = "\n".join([f"- {subj}: {mark}" for subj, mark in marks.items()])
-        test_name = (test_meta or {}).get("test_name") or "Unit Test"
-        semester = (test_meta or {}).get("semester") or "-"
-        department = (test_meta or {}).get("department") or stu.get("department", "-")
-        batch_name = (test_meta or {}).get("batch_name") or "-"
-
-        if custom_message_body:
-            msg = TemplateEngine.fill_template(
-                custom_message_body,
-                app_name=APP_NAME,
-                reg_no=rn,
-                student_name=stu.get("student_name", rn),
-                department=department,
-                test_name=test_name,
-                semester=semester,
-                batch_name=batch_name,
-                subjects_table=marks_table,
-                counselor_name=user["name"],
-            )
-        else:
-            msg = (
-                f"*RMKCET Parent Connect*\n"
-                f"Hello Parent,\n\n"
-                f"*Exam:* {test_name}\n"
-                f"*Semester:* {semester}\n"
-                f"*Department:* {department}\n"
-                f"*Batch:* {batch_name}\n\n"
-                f"*Student:* {stu.get('student_name', rn)}\n"
-                f"*Register No:* {rn}\n\n"
-                f"*Marks:*\n{marks_table}\n\n"
-                f"Regards,\n{user['name']}\nRMKCET"
-            )
+        marks_table = TemplateEngine.format_marks_table_simple(marks)
+        msg = TemplateEngine.fill_template(
+            MESSAGE_TEMPLATE,
+            app_name=APP_NAME,
+            reg_no=rn,
+            student_name=stu.get("student_name", rn),
+            department=stu.get("department", ""),
+            test_name=(test_meta or {}).get("test_name", "Unit Test"),
+            subjects_table=marks_table,
+            counselor_name=user["name"],
+        )
 
         phone = stu.get("parent_phone", "")
         wa = get_whatsapp_link(phone, msg) if phone else ""
-        db.log_message(email, rn, stu.get("student_name", ""), msg, fmt, wa, test_id=test_id)
+        db.log_message(email, rn, stu.get("student_name", ""), msg, fmt, wa)
 
         reports.append({
             "reg_no": rn,
@@ -986,8 +632,8 @@ def api_generate_reports():
 
     session["reports"] = reports
     session["report_test_id"] = test_id
-    flash(f"Reports generated for {len(reports)} pending students.", "success")
-    return redirect(url_for("counselor_page", tab="sendreports", test_id=test_id))
+    flash(f"Reports generated for {len(reports)} students.", "success")
+    return redirect(url_for("counselor_page"))
 
 
 @app.route("/api/reports/pdf/<reg_no>")

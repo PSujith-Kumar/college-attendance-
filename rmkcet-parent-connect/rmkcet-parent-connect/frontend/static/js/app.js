@@ -4,30 +4,41 @@
 
 // ---------- Tabs ----------
 document.addEventListener('DOMContentLoaded', () => {
+  function activateTab(tabBar, tabId, saveState = true) {
+    if (!tabId) return;
+    tabBar.querySelectorAll('.tab-btn').forEach(b => {
+      b.classList.toggle('active', b.dataset.tab === tabId);
+    });
+    const container = tabBar.parentElement;
+    container.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    const target = container.querySelector('#tab-' + tabId) || document.getElementById('tab-' + tabId);
+    if (target) target.classList.add('active');
+
+    if (saveState && tabBar.id) {
+      sessionStorage.setItem('activeTab:' + tabBar.id, tabId);
+    }
+  }
+
   // Initialize all tab groups
   document.querySelectorAll('.tabs').forEach(tabBar => {
     tabBar.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', () => {
-        const tabId = btn.dataset.tab;
-        // Deactivate siblings
-        tabBar.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        // Find sibling panels (next siblings of the tab bar's parent)
-        const container = tabBar.parentElement;
-        container.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-        const target = document.getElementById('tab-' + tabId);
-        if (target) target.classList.add('active');
-        // Save active tab in URL hash
-        history.replaceState(null, null, '#' + tabId);
+        activateTab(tabBar, btn.dataset.tab, true);
       });
     });
+
+    // Restore previously active tab without triggering synthetic clicks.
+    const fromQuery = new URLSearchParams(window.location.search).get('tab');
+    const fromSession = tabBar.id ? sessionStorage.getItem('activeTab:' + tabBar.id) : null;
+    const defaultBtn = tabBar.querySelector('.tab-btn.active') || tabBar.querySelector('.tab-btn');
+    const defaultTabId = defaultBtn ? defaultBtn.dataset.tab : null;
+    const targetTabId = fromQuery || fromSession || defaultTabId;
+    activateTab(tabBar, targetTabId, false);
   });
 
-  // Restore tab from URL hash
-  const hash = window.location.hash.slice(1);
-  if (hash) {
-    const btn = document.querySelector(`.tab-btn[data-tab="${hash}"]`);
-    if (btn) btn.click();
+  // Remove stale hash-based behavior from older versions.
+  if (window.location.hash) {
+    history.replaceState(null, '', window.location.pathname + window.location.search);
   }
 
   // Auto-dismiss flash messages

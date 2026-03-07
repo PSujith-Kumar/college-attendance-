@@ -31,8 +31,11 @@
 <div class="tabs" id="adminTabs">
   <button class="tab-btn active" data-tab="users"><i class="fas fa-users"></i> Users</button>
   <button class="tab-btn" data-tab="departments"><i class="fas fa-building"></i> Departments</button>
+  <button class="tab-btn" data-tab="tests"><i class="fas fa-clipboard-check"></i> Test History</button>
   <button class="tab-btn" data-tab="activity"><i class="fas fa-chart-line"></i> Counselor Activity</button>
   <button class="tab-btn" data-tab="sessions"><i class="fas fa-desktop"></i> Sessions</button>
+  <button class="tab-btn" data-tab="monitoring"><i class="fas fa-chart-area"></i> Session Monitoring</button>
+  <button class="tab-btn" data-tab="config"><i class="fas fa-cog"></i> Configuration</button>
   <button class="tab-btn" data-tab="formats"><i class="fas fa-file-alt"></i> Format Settings</button>
   <button class="tab-btn" data-tab="messages"><i class="fas fa-envelope"></i> Message Logs</button>
 </div>
@@ -134,6 +137,9 @@
         <button class="btn btn-outline btn-sm" onclick="openModal('upload-{{ loop.index }}')">
           <i class="fas fa-upload"></i> Students
         </button>
+        <button class="btn btn-outline btn-sm" onclick="openModal('manage-students-{{ loop.index }}')">
+          <i class="fas fa-user-pen"></i> Manage
+        </button>
         {% endif %}
         {% if u.is_locked %}
         <form method="POST" action="{{ url_for('api_unlock_user', email=u.email) }}" style="display:inline">
@@ -223,6 +229,70 @@
       </div>
     </div>
     {% endif %}
+
+    {% if u.role == 'counselor' %}
+    <div class="modal-overlay" id="modal-manage-students-{{ loop.index }}">
+      <div class="modal" style="max-width:980px;max-height:90vh;overflow:auto;">
+        <div class="modal-header">
+          <h3><i class="fas fa-user-pen"></i> Manage Students - {{ u.name }}</h3>
+          <button class="modal-close" onclick="closeModal('manage-students-{{ loop.index }}')">&times;</button>
+        </div>
+
+        <div class="card mb-2" style="padding:14px;">
+          <div class="card-title" style="font-size:.9rem;"><i class="fas fa-user-plus"></i> Add Student Manually</div>
+          <form method="POST" action="{{ url_for('api_admin_save_student') }}">
+            <input type="hidden" name="counselor_email" value="{{ u.email }}">
+            <div class="form-row">
+              <div class="form-group"><label class="form-label">Reg No</label><input class="form-control" name="reg_no" required></div>
+              <div class="form-group"><label class="form-label">Student Name</label><input class="form-control" name="student_name" required></div>
+              <div class="form-group"><label class="form-label">Department</label><input class="form-control" name="department" value="{{ u.department or '' }}"></div>
+            </div>
+            <div class="form-row">
+              <div class="form-group"><label class="form-label">Parent Phone</label><input class="form-control" name="parent_phone"></div>
+              <div class="form-group"><label class="form-label">Parent Email</label><input class="form-control" name="parent_email" type="email"></div>
+            </div>
+            <button class="btn btn-primary btn-sm"><i class="fas fa-plus"></i> Add Student</button>
+          </form>
+        </div>
+
+        <div class="table-wrapper">
+          <table>
+            <thead>
+              <tr><th>Reg No</th><th>Name</th><th>Department</th><th>Phone</th><th>Email</th><th>Actions</th></tr>
+            </thead>
+            <tbody>
+              {% for st in students_map.get(u.email, []) %}
+              <tr>
+                <form method="POST" action="{{ url_for('api_admin_save_student') }}">
+                  <input type="hidden" name="counselor_email" value="{{ u.email }}">
+                  <input type="hidden" name="original_reg_no" value="{{ st.reg_no }}">
+                  <td><input class="form-control" name="reg_no" value="{{ st.reg_no }}" required style="min-width:120px;"></td>
+                  <td><input class="form-control" name="student_name" value="{{ st.student_name }}" required style="min-width:180px;"></td>
+                  <td><input class="form-control" name="department" value="{{ st.department or '' }}" style="min-width:110px;"></td>
+                  <td><input class="form-control" name="parent_phone" value="{{ st.parent_phone or '' }}" style="min-width:130px;"></td>
+                  <td><input class="form-control" name="parent_email" value="{{ st.parent_email or '' }}" style="min-width:180px;"></td>
+                  <td>
+                    <div class="btn-group">
+                      <button class="btn btn-primary btn-sm" title="Save"><i class="fas fa-save"></i></button>
+                </form>
+                      <form method="POST" action="{{ url_for('api_admin_delete_student') }}" onsubmit="return confirm('Delete {{ st.reg_no }}?')" style="display:inline;">
+                        <input type="hidden" name="counselor_email" value="{{ u.email }}">
+                        <input type="hidden" name="reg_no" value="{{ st.reg_no }}">
+                        <button class="btn btn-danger btn-sm" title="Delete"><i class="fas fa-trash"></i></button>
+                      </form>
+                    </div>
+                  </td>
+              </tr>
+              {% endfor %}
+              {% if not students_map.get(u.email, []) %}
+              <tr><td colspan="6" class="text-center text-muted" style="padding:16px;">No students assigned yet.</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    {% endif %}
     {% endfor %}
   </div>
 </div>
@@ -286,6 +356,154 @@
     </table>
   </div>
 </div>
+
+<!-- ==================== TEST RESULTS TAB ==================== -->
+<div class="tab-panel" id="tab-tests">
+  <div class="d-flex justify-between align-center flex-wrap mb-2" style="gap:12px;">
+    <h3 class="section-title" style="margin:0"><i class="fas fa-clipboard-check"></i> All Test History</h3>
+    <div class="btn-group">
+      <form method="POST" action="{{ url_for('api_tests_cleanup_duplicates') }}" style="display:inline"
+            onsubmit="return confirm('Remove duplicate test uploads? This will keep only the most recent of each test.')">
+        <button class="btn btn-warning btn-sm"><i class="fas fa-broom"></i> Remove Duplicates</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Filters -->
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-filter"></i> Filter Tests</div>
+    <form method="GET" action="{{ url_for('admin') }}" id="testFilterForm">
+      <input type="hidden" name="tab" value="tests">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Batch</label>
+          <select class="form-control" name="filter_batch" onchange="this.form.submit()">
+            <option value="">All Batches</option>
+            {% for b in batches %}
+            <option value="{{ b }}" {% if request.args.get('filter_batch') == b %}selected{% endif %}>{{ b }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Semester</label>
+          <select class="form-control" name="filter_semester" onchange="this.form.submit()">
+            <option value="">All Semesters</option>
+            {% for i in range(1, 9) %}
+            <option value="{{ i }}" {% if request.args.get('filter_semester') == i|string %}selected{% endif %}>Semester {{ i }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Department</label>
+          <select class="form-control" name="filter_dept" onchange="this.form.submit()">
+            <option value="">All Departments</option>
+            {% for d in departments %}
+            <option value="{{ d.code }}" {% if request.args.get('filter_dept') == d.code %}selected{% endif %}>{{ d.code }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Counselor</label>
+          <select class="form-control" name="filter_counselor" onchange="this.form.submit()">
+            <option value="">All Counselors</option>
+            {% for u in users if u.role == 'counselor' %}
+            <option value="{{ u.email }}" {% if request.args.get('filter_counselor') == u.email %}selected{% endif %}>{{ u.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <button type="button" class="btn btn-outline btn-sm" onclick="clearFilters()"><i class="fas fa-times"></i> Clear Filters</button>
+    </form>
+  </div>
+
+  <!-- Tests table -->
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Test Name</th>
+          <th>Batch</th>
+          <th>Semester</th>
+          <th>Department</th>
+          <th>Uploaded By</th>
+          <th>Students</th>
+          <th>Uploaded At</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in all_tests %}
+        <tr {% if t.is_duplicate %}style="background:rgba(248,80,50,0.1)"{% endif %}>
+          <td>
+            <strong>{{ t.test_name or 'Test #' ~ t.id }}</strong>
+            {% if t.is_duplicate %}<span class="badge badge-danger" title="Duplicate upload">DUP</span>{% endif %}
+          </td>
+          <td>{{ t.batch_name or '—' }}</td>
+          <td>{{ t.semester or '—' }}</td>
+          <td>{{ t.department or '—' }}</td>
+          <td>
+            <span style="font-size:.85rem">{{ t.uploaded_by_name or t.uploaded_by or '—' }}</span>
+          </td>
+          <td><span class="badge badge-info">{{ t.student_count or 0 }}</span></td>
+          <td style="font-size:.82rem">{{ (t.uploaded_at or '')[:16] }}</td>
+          <td>
+            <div class="btn-group">
+              <button class="btn btn-outline btn-sm" onclick="openModal('test-view-{{ t.id }}')" title="View Details">
+                <i class="fas fa-eye"></i>
+              </button>
+              <form method="POST" action="{{ url_for('api_delete_test', test_id=t.id) }}" style="display:inline"
+                    onsubmit="return confirm('Delete this test and all its marks?')">
+                <button class="btn btn-danger btn-sm" title="Delete"><i class="fas fa-trash"></i></button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not all_tests %}
+        <tr><td colspan="8" class="text-center text-muted" style="padding:24px">No tests uploaded yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Duplicate detection info -->
+  {% set dup_count = all_tests|selectattr('is_duplicate')|list|length %}
+  {% if dup_count > 0 %}
+  <div class="alert alert-warning mt-2">
+    <i class="fas fa-exclamation-triangle"></i>
+    <strong>{{ dup_count }} duplicate(s) detected</strong> — Same test uploaded by multiple counselors.
+    Use "Remove Duplicates" to keep only the most recent upload.
+  </div>
+  {% endif %}
+</div>
+
+<!-- Test View Modals -->
+{% for t in all_tests %}
+<div class="modal-overlay" id="modal-test-view-{{ t.id }}">
+  <div class="modal" style="max-width:700px;">
+    <div class="modal-header">
+      <h3><i class="fas fa-clipboard-check"></i> {{ t.test_name or 'Test #' ~ t.id }}</h3>
+      <button class="modal-close" onclick="closeModal('test-view-{{ t.id }}')">&times;</button>
+    </div>
+    <div class="test-details">
+      <p><strong>Batch:</strong> {{ t.batch_name or 'N/A' }}</p>
+      <p><strong>Semester:</strong> {{ t.semester or 'N/A' }}</p>
+      <p><strong>Department:</strong> {{ t.department or 'N/A' }}</p>
+      <p><strong>Uploaded By:</strong> {{ t.uploaded_by_name or t.uploaded_by or 'Unknown' }}</p>
+      <p><strong>Uploaded At:</strong> {{ (t.uploaded_at or 'N/A')[:19] }}</p>
+      <p><strong>Students:</strong> {{ t.student_count or 0 }}</p>
+      {% if t.subjects %}
+      <p><strong>Subjects:</strong></p>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px;">
+        {% for subj in t.subjects %}
+        <span class="badge badge-primary">{{ subj }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endfor %}
 
 <!-- ==================== ACTIVITY TAB ==================== -->
 <div class="tab-panel" id="tab-activity">
@@ -460,6 +678,341 @@
   </div>
 </div>
 
+<!-- ==================== SESSION MONITORING TAB ==================== -->
+<div class="tab-panel" id="tab-monitoring">
+  <h3 class="section-title"><i class="fas fa-chart-area"></i> Session Monitoring Dashboard</h3>
+  
+  <!-- Monitoring Metrics -->
+  <div class="metrics-grid mb-3">
+    <div class="metric-card">
+      <div class="metric-label">Active Sessions</div>
+      <div class="metric-value text-success">{{ session_stats.active_sessions }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Today's Logins</div>
+      <div class="metric-value">{{ session_stats.today_sessions }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Avg Duration</div>
+      <div class="metric-value">{{ session_stats.avg_duration_minutes }}m</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Forced Logouts</div>
+      <div class="metric-value text-warning">{{ session_stats.forced_logouts }}</div>
+    </div>
+  </div>
+  
+  <div class="metrics-grid mb-3">
+    <div class="metric-card">
+      <div class="metric-label">Peak Concurrent</div>
+      <div class="metric-value">{{ session_stats.peak_concurrent }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Desktop Sessions</div>
+      <div class="metric-value">{{ session_stats.desktop_sessions }}</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Mobile Sessions</div>
+      <div class="metric-value">{{ session_stats.mobile_sessions }}</div>
+    </div>
+  </div>
+  
+  <!-- Logout Reasons Breakdown -->
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-sign-out-alt"></i> Logout Reasons Breakdown</div>
+    {% if session_stats.logout_reasons %}
+    <div class="logout-reasons-grid">
+      {% for reason, count in session_stats.logout_reasons.items() %}
+      <div class="reason-card">
+        <span class="reason-name">
+          {% if reason == 'user_logout' %}👤 User Logout
+          {% elif reason == 'session_timeout' %}⏰ Session Timeout
+          {% elif reason == 'new_login' %}🔄 New Login
+          {% elif reason == 'new_device_login' %}📱 New Device
+          {% elif reason == 'admin_action' %}🔐 Admin Action
+          {% elif reason == 'admin_logout_all' %}⚡ Mass Logout
+          {% elif reason == 'account_locked' %}🔒 Account Locked
+          {% else %}{{ reason }}
+          {% endif %}
+        </span>
+        <span class="reason-count badge badge-info">{{ count }}</span>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="text-muted">No session logout data available yet.</p>
+    {% endif %}
+  </div>
+  
+  <!-- Session History -->
+  <h3 class="section-title"><i class="fas fa-history"></i> Recent Session History</h3>
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Role</th>
+          <th>Login Time</th>
+          <th>Duration</th>
+          <th>IP Address</th>
+          <th>Status</th>
+          <th>Logout Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in session_history[:50] %}
+        <tr>
+          <td>
+            <strong>{{ s.name or s.user_email }}</strong><br>
+            <span style="font-size:.75rem;color:var(--text-dim)">{{ s.user_email }}</span>
+          </td>
+          <td><span class="badge badge-primary">{{ (s.role or 'N/A')|title }}</span></td>
+          <td style="font-size:.82rem">{{ (s.login_time or '')[:16] }}</td>
+          <td>{{ s.duration or 'N/A' }}</td>
+          <td style="font-size:.82rem">{{ s.ip_address or 'N/A' }}</td>
+          <td>
+            {% if s.is_active %}<span class="badge badge-success">Active</span>
+            {% elif s.forced_logout %}<span class="badge badge-danger">Forced</span>
+            {% else %}<span class="badge badge-muted">Ended</span>{% endif %}
+          </td>
+          <td style="font-size:.82rem">{{ s.logout_reason or '—' }}</td>
+        </tr>
+        {% endfor %}
+        {% if not session_history %}
+        <tr><td colspan="7" class="text-center text-muted" style="padding:24px">No session history.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ==================== CONFIGURATION TAB ==================== -->
+<div class="tab-panel" id="tab-config">
+  <h3 class="section-title"><i class="fas fa-cog"></i> Application Configuration</h3>
+  
+  <form method="POST" action="{{ url_for('api_update_config') }}">
+    <!-- Session Settings -->
+    <div class="card mb-3">
+      <div class="card-title"><i class="fas fa-shield-alt"></i> Session Security Settings</div>
+      
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Session Timeout (seconds)</label>
+          <input type="number" class="form-control" name="session_timeout" 
+                 value="{{ app_config.session_timeout }}" min="300" max="86400">
+          <small style="color:var(--text-dim);font-size:.75rem;">
+            Inactive users logged out after this time (300-86400s)
+          </small>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Heartbeat Interval (seconds)</label>
+          <input type="number" class="form-control" name="session_heartbeat_interval" 
+                 value="{{ app_config.session_heartbeat_interval }}" min="10" max="120">
+          <small style="color:var(--text-dim);font-size:.75rem;">
+            How often to check session validity (10-120s)
+          </small>
+        </div>
+      </div>
+      
+      <div class="form-check">
+        <input type="checkbox" name="session_monitoring_enabled" id="sessionMonitoring"
+               {% if app_config.session_monitoring_enabled == 'true' %}checked{% endif %}>
+        <label for="sessionMonitoring">Enable Session Monitoring Dashboard</label>
+      </div>
+      
+      <div class="form-check">
+        <input type="checkbox" name="allow_concurrent_sessions" id="allowConcurrent"
+               {% if app_config.allow_concurrent_sessions == 'true' %}checked{% endif %}>
+        <label for="allowConcurrent">Allow Same User on Multiple Devices</label>
+      </div>
+      
+      <div class="form-group" style="margin-top:12px;">
+        <label class="form-label">Max Concurrent Sessions per User</label>
+        <input type="number" class="form-control" name="max_concurrent_sessions" 
+               value="{{ app_config.max_concurrent_sessions }}" min="1" max="5" style="max-width:120px;">
+      </div>
+    </div>
+    
+    <!-- Primary Theme Colors -->
+    <div class="card mb-3">
+      <div class="card-title"><i class="fas fa-palette"></i> Primary Theme Colors</div>
+      
+      <div class="color-grid">
+        <div class="color-item">
+          <label class="form-label">🎨 Primary Color</label>
+          <div class="color-input-row">
+            <input type="color" name="color_primary" value="{{ app_config.color_primary }}">
+            <span class="color-hex">{{ app_config.color_primary }}</span>
+          </div>
+          <small>Main buttons, links, accents</small>
+        </div>
+        
+        <div class="color-item">
+          <label class="form-label">🎨 Primary Dark</label>
+          <div class="color-input-row">
+            <input type="color" name="color_primary_dark" value="{{ app_config.color_primary_dark }}">
+            <span class="color-hex">{{ app_config.color_primary_dark }}</span>
+          </div>
+          <small>Hover states, active elements</small>
+        </div>
+        
+        <div class="color-item">
+          <label class="form-label">🎨 Secondary Color</label>
+          <div class="color-input-row">
+            <input type="color" name="color_secondary" value="{{ app_config.color_secondary }}">
+            <span class="color-hex">{{ app_config.color_secondary }}</span>
+          </div>
+          <small>Gradients, secondary accents</small>
+        </div>
+        
+        <div class="color-item">
+          <label class="form-label">🎨 Accent Color</label>
+          <div class="color-input-row">
+            <input type="color" name="color_accent" value="{{ app_config.color_accent }}">
+            <span class="color-hex">{{ app_config.color_accent }}</span>
+          </div>
+          <small>Highlights, special elements</small>
+        </div>
+      </div>
+      
+      <div class="theme-preview mt-2" style="padding:16px;border-radius:var(--radius);background:linear-gradient(135deg, {{ app_config.color_primary }}, {{ app_config.color_secondary }});text-align:center;">
+        <span style="color:#fff;font-weight:600;">Primary Theme Preview</span>
+      </div>
+    </div>
+    
+    <!-- Semantic Colors -->
+    <div class="card mb-3">
+      <div class="card-title"><i class="fas fa-traffic-light"></i> Status &amp; Semantic Colors</div>
+      
+      <div class="color-grid">
+        <div class="color-item">
+          <label class="form-label">✅ Success Color</label>
+          <div class="color-input-row">
+            <input type="color" name="color_success" value="{{ app_config.color_success }}">
+            <span class="color-hex">{{ app_config.color_success }}</span>
+          </div>
+          <small>Success messages, confirmed states</small>
+        </div>
+        
+        <div class="color-item">
+          <label class="form-label">⚠️ Warning Color</label>
+          <div class="color-input-row">
+            <input type="color" name="color_warning" value="{{ app_config.color_warning }}">
+            <span class="color-hex">{{ app_config.color_warning }}</span>
+          </div>
+          <small>Warnings, pending states</small>
+        </div>
+        
+        <div class="color-item">
+          <label class="form-label">❌ Danger Color</label>
+          <div class="color-input-row">
+            <input type="color" name="color_danger" value="{{ app_config.color_danger }}">
+            <span class="color-hex">{{ app_config.color_danger }}</span>
+          </div>
+          <small>Errors, delete actions</small>
+        </div>
+        
+        <div class="color-item">
+          <label class="form-label">ℹ️ Info Color</label>
+          <div class="color-input-row">
+            <input type="color" name="color_info" value="{{ app_config.color_info }}">
+            <span class="color-hex">{{ app_config.color_info }}</span>
+          </div>
+          <small>Information, tips</small>
+        </div>
+      </div>
+      
+      <div class="status-preview mt-2">
+        <span class="badge" style="background:rgba(37,211,102,0.15);color:{{ app_config.color_success }}">Success</span>
+        <span class="badge" style="background:rgba(245,158,11,0.15);color:{{ app_config.color_warning }}">Warning</span>
+        <span class="badge" style="background:rgba(239,68,68,0.15);color:{{ app_config.color_danger }}">Danger</span>
+        <span class="badge" style="background:rgba(59,130,246,0.15);color:{{ app_config.color_info }}">Info</span>
+      </div>
+    </div>
+    
+    <!-- Background Colors -->
+    <div class="card mb-3">
+      <div class="card-title"><i class="fas fa-fill-drip"></i> Background Colors</div>
+      
+      <div class="color-grid">
+        <div class="color-item">
+          <label class="form-label">🖼️ Primary Background</label>
+          <div class="color-input-row">
+            <input type="color" name="color_bg_primary" value="{{ app_config.color_bg_primary }}">
+            <span class="color-hex">{{ app_config.color_bg_primary }}</span>
+          </div>
+          <small>Main page background</small>
+        </div>
+        
+        <div class="color-item">
+          <label class="form-label">🖼️ Secondary Background</label>
+          <div class="color-input-row">
+            <input type="color" name="color_bg_secondary" value="{{ app_config.color_bg_secondary }}">
+            <span class="color-hex">{{ app_config.color_bg_secondary }}</span>
+          </div>
+          <small>Sidebar, modals</small>
+        </div>
+      </div>
+
+      <div class="form-row" style="margin-top:12px;">
+        <div class="form-group">
+          <label class="form-label">Card Surface Color (RGBA)</label>
+          <input type="text" class="form-control" name="color_bg_card" value="{{ app_config.color_bg_card }}" placeholder="rgba(20, 30, 50, 0.65)">
+          <small style="color:var(--text-dim);font-size:.75rem;">Used for cards and glass surfaces</small>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Border Color (RGBA)</label>
+          <input type="text" class="form-control" name="color_border" value="{{ app_config.color_border }}" placeholder="rgba(102, 126, 234, 0.18)">
+          <small style="color:var(--text-dim);font-size:.75rem;">Used for card and component borders</small>
+        </div>
+      </div>
+    </div>
+    
+    <!-- Text Colors -->
+    <div class="card mb-3">
+      <div class="card-title"><i class="fas fa-font"></i> Text Colors</div>
+      
+      <div class="color-grid">
+        <div class="color-item">
+          <label class="form-label">📝 Primary Text</label>
+          <div class="color-input-row">
+            <input type="color" name="color_text" value="{{ app_config.color_text }}">
+            <span class="color-hex">{{ app_config.color_text }}</span>
+          </div>
+          <small>Main body text</small>
+        </div>
+        
+        <div class="color-item">
+          <label class="form-label">📝 Dim Text</label>
+          <div class="color-input-row">
+            <input type="color" name="color_text_dim" value="{{ app_config.color_text_dim }}">
+            <span class="color-hex">{{ app_config.color_text_dim }}</span>
+          </div>
+          <small>Labels, secondary text</small>
+        </div>
+        
+        <div class="color-item">
+          <label class="form-label">📝 Muted Text</label>
+          <div class="color-input-row">
+            <input type="color" name="color_text_muted" value="{{ app_config.color_text_muted }}">
+            <span class="color-hex">{{ app_config.color_text_muted }}</span>
+          </div>
+          <small>Placeholders, hints</small>
+        </div>
+      </div>
+    </div>
+    
+    <div class="btn-group">
+      <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save All Settings</button>
+      <button type="button" class="btn btn-outline" onclick="document.getElementById('resetThemeForm').submit()">
+        <i class="fas fa-undo"></i> Reset to Defaults
+      </button>
+    </div>
+  </form>
+  
+  <form id="resetThemeForm" method="POST" action="{{ url_for('api_reset_theme') }}" style="display:none;"></form>
+</div>
+
 <!-- ==================== FORMAT SETTINGS TAB ==================== -->
 <div class="tab-panel" id="tab-formats">
   <div class="card" style="max-width:560px;">
@@ -530,4 +1083,12 @@
     </table>
   </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function clearFilters() {
+  window.location.href = '{{ url_for("admin") }}?tab=tests';
+}
+</script>
 {% endblock %}
