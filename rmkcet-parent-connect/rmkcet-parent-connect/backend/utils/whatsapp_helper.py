@@ -1,15 +1,15 @@
 # utils/whatsapp_helper.py
 """WhatsApp link generation."""
 import urllib.parse
-from config import COUNTRY_CODE, WHATSAPP_BASE_URL
+from config import COUNTRY_CODE
 
 
 def get_whatsapp_link(phone_number, message: str) -> str:
-    """Generate WhatsApp link with pre-filled message."""
+    """Generate direct WhatsApp app deep-link with pre-filled message."""
     phone = ''.join(c for c in str(phone_number) if c.isdigit())[-10:]
     full_phone = f"{COUNTRY_CODE}{phone}"
     encoded = urllib.parse.quote(message)
-    return f"{WHATSAPP_BASE_URL}{full_phone}?text={encoded}"
+    return f"whatsapp://send?phone={full_phone}&text={encoded}"
 
 
 def format_phone_display(phone_number) -> str:

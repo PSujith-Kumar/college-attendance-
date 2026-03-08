@@ -34,7 +34,7 @@
   
   {% block head %}{% endblock %}
 </head>
-<body>
+<body class="light-theme">
   {% if current_user_email %}
   <!-- SIDEBAR -->
   <aside class="sidebar" id="sidebar">
@@ -46,17 +46,41 @@
           <span class="logo-subtitle">Parent Connect</span>
         </div>
       </div>
-      <button class="sidebar-toggle" id="sidebarToggle"><i class="fas fa-bars"></i></button>
+      {% if current_role == 'admin' %}
+      <a href="{{ url_for('admin', tab='config') }}" class="logo-settings" title="Configuration">
+        <i class="fas fa-cog"></i>
+      </a>
+      {% endif %}
     </div>
 
     <nav class="sidebar-nav">
       {% if current_role == 'admin' %}
-      <a href="{{ url_for('admin') }}" class="nav-link {% if request.path == '/admin' %}active{% endif %}">
-        <i class="fas fa-tachometer-alt"></i><span>Dashboard</span>
+      {% set active_admin_tab = request.args.get('tab', 'users') %}
+      <a href="{{ url_for('admin', tab='users') }}" class="nav-link tab-nav {% if active_admin_tab == 'users' %}active{% endif %}" data-tab="users">
+        <i class="fas fa-users"></i><span>Users</span>
+      </a>
+      <a href="{{ url_for('admin', tab='departments') }}" class="nav-link tab-nav {% if active_admin_tab == 'departments' %}active{% endif %}" data-tab="departments">
+        <i class="fas fa-building"></i><span>Departments</span>
+      </a>
+      <a href="{{ url_for('admin', tab='tests') }}" class="nav-link tab-nav {% if active_admin_tab == 'tests' %}active{% endif %}" data-tab="tests">
+        <i class="fas fa-clipboard-check"></i><span>Test History</span>
+      </a>
+      <a href="{{ url_for('admin', tab='activity') }}" class="nav-link tab-nav {% if active_admin_tab == 'activity' %}active{% endif %}" data-tab="activity">
+        <i class="fas fa-chart-line"></i><span>Counselor Activity</span>
+      </a>
+      <a href="{{ url_for('admin', tab='monitoring') }}" class="nav-link tab-nav {% if active_admin_tab == 'monitoring' %}active{% endif %}" data-tab="monitoring">
+        <i class="fas fa-chart-area"></i><span>Session Monitoring</span>
+      </a>
+      <a href="{{ url_for('admin', tab='messages') }}" class="nav-link tab-nav {% if active_admin_tab == 'messages' %}active{% endif %}" data-tab="messages">
+        <i class="fas fa-envelope"></i><span>Message Logs</span>
       </a>
       {% else %}
-      <a href="{{ url_for('counselor_page') }}" class="nav-link {% if request.path == '/counselor' %}active{% endif %}">
-        <i class="fas fa-tachometer-alt"></i><span>Dashboard</span>
+      {% set active_counselor_tab = request.args.get('tab', 'reports') %}
+      <a href="{{ url_for('counselor_page', tab='reports') }}" class="nav-link tab-nav {% if active_counselor_tab == 'reports' %}active{% endif %}" data-tab="reports">
+        <i class="fas fa-file-lines"></i><span>Reports</span>
+      </a>
+      <a href="{{ url_for('counselor_page', tab='history') }}" class="nav-link tab-nav {% if active_counselor_tab == 'history' %}active{% endif %}" data-tab="history">
+        <i class="fas fa-history"></i><span>History</span>
       </a>
       {% endif %}
     </nav>
@@ -78,8 +102,11 @@
     <!-- HEADER -->
     <header class="top-header">
       <button class="mobile-toggle" id="mobileToggle"><i class="fas fa-bars"></i></button>
-      <h1 class="page-title">{% block page_title %}Dashboard{% endblock %}</h1>
+      <h1 class="page-title">{% block page_title %}Panel{% endblock %}</h1>
       <div class="header-actions">
+        <button class="btn btn-outline btn-sm" id="themeToggle" type="button" title="Toggle theme">
+          <i class="fas fa-sun" id="themeToggleIcon"></i>
+        </button>
         <span class="header-badge"><i class="fas fa-clock"></i> {{ now.strftime('%d %b %Y, %H:%M') }}</span>
       </div>
     </header>

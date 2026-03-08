@@ -7,9 +7,12 @@ import os
 import io
 import csv
 import json
+import hashlib
 import uuid
 from datetime import datetime
 from functools import wraps
+from urllib.parse import urlparse, parse_qs
+import re
 
 from flask import (
     Flask, render_template, request, redirect, url_for,
@@ -94,6 +97,47 @@ def admin_required(f):
     return decorated
 
 
+def _get_admin_tab(default_tab="users"):
+    """Resolve active admin tab from form/query/referrer."""
+    tab = (request.form.get("tab") or request.args.get("tab") or "").strip()
+    if tab:
+        return tab
+
+    ref = (request.referrer or "").strip()
+    if ref:
+        try:
+            parsed = urlparse(ref)
+            ref_tab = parse_qs(parsed.query).get("tab", [""])[0].strip()
+            if ref_tab:
+                return ref_tab
+        except Exception:
+            pass
+
+    return default_tab
+
+
+def _redirect_admin_back(default_tab="users", **extra_query):
+    params = {"tab": _get_admin_tab(default_tab)}
+    for key, value in extra_query.items():
+        if value is None:
+            continue
+        sval = str(value).strip()
+        if sval:
+            params[key] = sval
+    return redirect(url_for("admin", **params))
+
+
+def _get_message_filters_from_request():
+    msg_day = (request.values.get("msg_day") or "").strip()
+    msg_q = (request.values.get("msg_q") or "").strip()
+    return msg_day, msg_q
+
+
+def _message_export_filename(ext):
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"message_activity_{stamp}.{ext}"
+
+
 # ---------------------------------------------------------------------------
 # Context processor – inject common vars into every template
 # ---------------------------------------------------------------------------
@@ -107,6 +151,95 @@ def inject_globals():
         "current_role": session.get("role"),
         "now": datetime.now(),
     }
+
+
+def _normalize_metric_key(key):
+    return re.sub(r"[^a-z0-9]", "", str(key or "").lower())
+
+
+def _is_unknown_metric_field(raw_key, key_norm):
+    raw = str(raw_key or "").strip().lower()
+    if not raw:
+        return True
+    if raw.startswith("unnamed"):
+        return True
+    if re.match(r"^subject[_\s-]*\d+$", raw):
+        return True
+    if key_norm.startswith("unnamed"):
+        return True
+    return False
+
+
+def _is_absent_mark(value):
+    s = str(value or "").strip().lower()
+    return s in {"absent", "ab", "a", "na", "-", "not attended"}
+
+
+def _build_parent_subjects_table(marks):
+    """Build standardized marks block and ignore unknown/non-academic fields."""
+    if not isinstance(marks, dict):
+        return ""
+
+    attendance = None
+    gpa = None
+    subject_rows = []
+
+    attendance_keys = {"attendance", "att"}
+    gpa_keys = {"gpa", "cgpa"}
+    failed_keys = {"noofsubjectsfailed", "failedsubjects", "failedcount", "nooffailedsubjects"}
+    not_attended_keys = {"examnotattended", "notattended", "absentcount", "noofsubjectsabsent"}
+    ignored_keys = {
+        "regno", "registernumber", "name", "studentname", "department", "section",
+        "batch", "semester", "test", "total", "overall", "percentage", "grade",
+        "result", "status", "parentphone", "phone", "parentemail", "email",
+        "sno", "slno", "serialno", "serialnumber", "rollno",
+        "absentees", "absentee", "absentstudents"
+    }
+
+    for raw_key, raw_val in marks.items():
+        key_norm = _normalize_metric_key(raw_key)
+        value = str(raw_val or "").strip()
+        if _is_unknown_metric_field(raw_key, key_norm):
+            continue
+        if not key_norm or key_norm in ignored_keys:
+            continue
+
+        if key_norm in attendance_keys:
+            attendance = value
+            continue
+        if key_norm in gpa_keys:
+            gpa = value
+            continue
+        if key_norm in failed_keys:
+            continue
+        if key_norm in not_attended_keys:
+            continue
+
+        subject_rows.append((str(raw_key).strip(), value))
+
+    lines = []
+    if attendance:
+        lines.append(f"Attendance :\t{attendance}")
+        lines.append("")
+    for subject, value in subject_rows:
+        lines.append(f"{subject} :\t{value}")
+    if gpa:
+        lines.append(f"GPA :\t{gpa}")
+
+    return "\n".join(lines)
+
+
+def _build_parent_message(test_name, reg_no, student_name, marks):
+    marks_table = _build_parent_subjects_table(marks)
+    return (
+        f"Dear Parent , The Following is the {test_name} Marks Secured in each Course by your son/daughter\n\n"
+        f"REGISTER NUMBER :  {reg_no}\n"
+        f"NAME : {student_name}\n\n"
+        f"{marks_table}\n\n"
+        f"Regards\n"
+        f"PRINCIPAL\n"
+        f"RMKCET"
+    )
 
 
 # ============================= PAGE ROUTES =================================
@@ -188,7 +321,15 @@ def admin():
     active_sessions = db.get_active_sessions()
     activity = db.get_counselor_activity_summary()
     format_settings = db.get_format_settings()
-    messages = db.get_message_history(limit=200)
+    msg_day = (request.args.get("msg_day") or "").strip()
+    msg_q = (request.args.get("msg_q") or "").strip()
+    messages = db.get_message_history_filtered(day=msg_day or None, counselor_query=msg_q or None, limit=1500)
+    message_days = db.get_message_days(counselor_query=msg_q or None)
+    grouped_map = {}
+    for m in messages:
+        day_key = str((m.get("sent_at") or "")[:10] or "Unknown")
+        grouped_map.setdefault(day_key, []).append(m)
+    message_groups = [{"day": day, "messages": rows, "total": len(rows)} for day, rows in grouped_map.items()]
     msg_stats = db.get_message_stats()
     
     # App configuration
@@ -227,6 +368,10 @@ def admin():
         activity=activity,
         format_settings=format_settings,
         messages=messages,
+        message_groups=message_groups,
+        message_days=message_days,
+        selected_message_day=msg_day,
+        message_query=msg_q,
         msg_stats=msg_stats,
         counselor_count=len(counselors),
         active_counselor_count=sum(1 for c in counselors if c["is_active"]),
@@ -238,6 +383,173 @@ def admin():
         session_stats=session_stats,
         session_history=session_history,
         students_map=students_map,
+    )
+
+
+@app.route("/api/messages/delete/<int:message_id>", methods=["POST"])
+@login_required
+@admin_required
+def api_delete_message(message_id):
+    msg_day, msg_q = _get_message_filters_from_request()
+    deleted = db.delete_message_by_id(message_id)
+    if deleted:
+        flash("Message entry deleted.", "success")
+    else:
+        flash("Message entry not found.", "warning")
+    return _redirect_admin_back("messages", msg_day=msg_day, msg_q=msg_q)
+
+
+@app.route("/api/messages/delete-bulk", methods=["POST"])
+@login_required
+@admin_required
+def api_delete_messages_bulk():
+    msg_day, msg_q = _get_message_filters_from_request()
+    ids = request.form.getlist("message_ids")
+    if not ids:
+        flash("Select at least one message to delete.", "warning")
+        return _redirect_admin_back("messages", msg_day=msg_day, msg_q=msg_q)
+
+    deleted = db.delete_messages_by_ids(ids)
+    if deleted:
+        flash(f"Deleted {deleted} message entr{'y' if deleted == 1 else 'ies'}.", "success")
+    else:
+        flash("No messages were deleted.", "warning")
+    return _redirect_admin_back("messages", msg_day=msg_day, msg_q=msg_q)
+
+
+@app.route("/api/messages/export/csv")
+@login_required
+@admin_required
+def api_export_messages_csv():
+    msg_day, msg_q = _get_message_filters_from_request()
+    data = db.get_message_history_filtered(day=msg_day or None, counselor_query=msg_q or None, limit=None)
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Date", "Time", "Counselor", "Counselor Email", "Student", "Reg No", "Format", "Status", "Test ID"])
+    for m in data:
+        sent_at = str(m.get("sent_at") or "")
+        date_part = sent_at[:10]
+        time_part = sent_at[11:19] if len(sent_at) >= 19 else ""
+        w.writerow([
+            date_part,
+            time_part,
+            m.get("counselor_name") or m.get("counselor_email") or "",
+            m.get("counselor_email") or "",
+            m.get("student_name") or "",
+            m.get("reg_no") or "",
+            m.get("format") or "",
+            m.get("status") or "",
+            m.get("test_id") or "",
+        ])
+
+    buf.seek(0)
+    return Response(
+        buf.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment;filename={_message_export_filename('csv')}"},
+    )
+
+
+@app.route("/api/messages/export/excel")
+@login_required
+@admin_required
+def api_export_messages_excel():
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    msg_day, msg_q = _get_message_filters_from_request()
+    data = db.get_message_history_filtered(day=msg_day or None, counselor_query=msg_q or None, limit=None)
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Message Activity"
+
+    headers = ["Date", "Time", "Counselor", "Counselor Email", "Student", "Reg No", "Format", "Status", "Test ID"]
+    header_fill = PatternFill(start_color="667eea", end_color="667eea", fill_type="solid")
+    header_font = Font(bold=True, color="FFFFFF")
+    for ci, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=ci, value=h)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    for ri, m in enumerate(data, 2):
+        sent_at = str(m.get("sent_at") or "")
+        ws.cell(row=ri, column=1, value=sent_at[:10])
+        ws.cell(row=ri, column=2, value=sent_at[11:19] if len(sent_at) >= 19 else "")
+        ws.cell(row=ri, column=3, value=m.get("counselor_name") or m.get("counselor_email") or "")
+        ws.cell(row=ri, column=4, value=m.get("counselor_email") or "")
+        ws.cell(row=ri, column=5, value=m.get("student_name") or "")
+        ws.cell(row=ri, column=6, value=m.get("reg_no") or "")
+        ws.cell(row=ri, column=7, value=m.get("format") or "")
+        ws.cell(row=ri, column=8, value=m.get("status") or "")
+        ws.cell(row=ri, column=9, value=m.get("test_id") or "")
+
+    for col in ws.columns:
+        max_len = max(len(str(c.value or "")) for c in col) + 2
+        ws.column_dimensions[col[0].column_letter].width = min(max_len, 36)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=_message_export_filename("xlsx"),
+    )
+
+
+@app.route("/api/messages/export/pdf")
+@login_required
+@admin_required
+def api_export_messages_pdf():
+    msg_day, msg_q = _get_message_filters_from_request()
+    data = db.get_message_history_filtered(day=msg_day or None, counselor_query=msg_q or None, limit=None)
+
+    pdf = FPDF("L")
+    pdf.add_page()
+    pdf.set_font("Arial", "B", 15)
+    pdf.cell(0, 10, "RMKCET Parent Connect - Message Activity", 0, 1, "C")
+    pdf.set_font("Arial", "", 9)
+    subtitle = f"Day: {msg_day or 'All'}   Counselor Search: {msg_q or 'All'}   Generated: {datetime.now().strftime('%d-%b-%Y %H:%M')}"
+    pdf.cell(0, 8, subtitle[:150], 0, 1, "C")
+    pdf.ln(2)
+
+    widths = [24, 18, 44, 52, 36, 24, 20, 20, 18]
+    heads = ["Date", "Time", "Counselor", "Email", "Student", "Reg No", "Format", "Status", "Test ID"]
+
+    pdf.set_font("Arial", "B", 8)
+    pdf.set_fill_color(102, 126, 234)
+    pdf.set_text_color(255, 255, 255)
+    for w, h in zip(widths, heads):
+        pdf.cell(w, 8, h, 1, 0, "C", True)
+    pdf.ln()
+
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Arial", "", 7)
+    for m in data:
+        sent_at = str(m.get("sent_at") or "")
+        pdf.cell(widths[0], 7, sent_at[:10], 1)
+        pdf.cell(widths[1], 7, (sent_at[11:19] if len(sent_at) >= 19 else ""), 1)
+        pdf.cell(widths[2], 7, str(m.get("counselor_name") or m.get("counselor_email") or "")[:24], 1)
+        pdf.cell(widths[3], 7, str(m.get("counselor_email") or "")[:30], 1)
+        pdf.cell(widths[4], 7, str(m.get("student_name") or "")[:20], 1)
+        pdf.cell(widths[5], 7, str(m.get("reg_no") or "")[:14], 1)
+        pdf.cell(widths[6], 7, str(m.get("format") or "")[:10], 1, 0, "C")
+        pdf.cell(widths[7], 7, str(m.get("status") or "")[:10], 1, 0, "C")
+        pdf.cell(widths[8], 7, str(m.get("test_id") or "")[:8], 1, 1, "C")
+
+    buf = io.BytesIO()
+    raw = pdf.output(dest="S")
+    buf.write(raw if isinstance(raw, bytes) else raw.encode("latin-1"))
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=_message_export_filename("pdf"),
     )
 
 
@@ -253,7 +565,7 @@ def counselor_page():
         return redirect(url_for("login"))
 
     students = db.get_students(email)
-    tests = db.get_tests_by_counselor(email)
+    tests = db.get_visible_tests_for_counselor(email)
     msg_stats = db.get_message_stats(email)
     msg_history = db.get_message_history(email, limit=50)
     
@@ -274,6 +586,7 @@ def counselor_page():
         "counselor.html",
         user=user,
         students=students,
+        assigned_students_count=len(students),
         tests=tests,
         msg_stats=msg_stats,
         msg_history=msg_history,
@@ -283,6 +596,7 @@ def counselor_page():
         pending_students=pending_students,
         sent_count=(len(sent_reg_nos) if selected_test_id else 0),
         can_upload_students=bool(user.get("can_upload_students", 1)),
+        report_tab=(request.args.get("tab") or "reports"),
     )
 
 
@@ -296,36 +610,47 @@ def counselor_page():
 def api_create_user():
     email = request.form.get("email", "").strip()
     password = request.form.get("password", "")
+    confirm_password = request.form.get("confirm_password", "")
     name = request.form.get("name", "").strip()
     role = request.form.get("role", "counselor")
-    department = request.form.get("department", "").strip()
-    max_students_raw = request.form.get("max_students", "30")
-    can_upload = request.form.get("can_upload_students") == "on"
-
-    try:
-        max_students = int(max_students_raw)
-    except (TypeError, ValueError):
-        flash("Max students must be a valid number.", "error")
-        return redirect(url_for("admin"))
-
-    if max_students < 1 or max_students > 500:
-        flash("Max students must be between 1 and 500.", "error")
-        return redirect(url_for("admin"))
-
     role = role if role in {"admin", "counselor"} else "counselor"
+
+    if role == "admin":
+        # Admins get unrestricted defaults and do not need counselor-specific fields.
+        department = ""
+        max_students = 500
+        can_upload = True
+    else:
+        department = request.form.get("department", "").strip()
+        max_students_raw = request.form.get("max_students", "30")
+        can_upload = request.form.get("can_upload_students") == "on"
+
+        try:
+            max_students = int(max_students_raw)
+        except (TypeError, ValueError):
+            flash("Max students must be a valid number.", "error")
+            return _redirect_admin_back("users")
+
+        if max_students < 1 or max_students > 500:
+            flash("Max students must be between 1 and 500.", "error")
+            return _redirect_admin_back("users")
 
     if not email or not password or not name:
         flash("All required fields must be filled.", "error")
-        return redirect(url_for("admin"))
+        return _redirect_admin_back("users")
+
+    if password != confirm_password:
+        flash("Password and confirm password do not match.", "error")
+        return _redirect_admin_back("users")
 
     if len(password) < 6:
         flash("Password must be at least 6 characters.", "error")
-        return redirect(url_for("admin"))
+        return _redirect_admin_back("users")
 
     ok, msg = db.create_user(email, password, name, role, department, max_students, can_upload)
 
-    # Optional student file during registration
-    if ok and "student_file" in request.files:
+    # Optional student file during registration (counselors only)
+    if ok and role == "counselor" and "student_file" in request.files:
         f = request.files["student_file"]
         if f and f.filename:
             try:
@@ -338,10 +663,10 @@ def api_create_user():
                     flash("User created but no valid students found in the uploaded file.", "warning")
             except Exception as e:
                 flash(f"User created but student upload failed: {e}", "warning")
-            return redirect(url_for("admin"))
+            return _redirect_admin_back("users")
 
     flash(msg, "success" if ok else "error")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("users")
 
 
 @app.route("/api/users/<path:email>/update", methods=["POST"])
@@ -363,7 +688,7 @@ def api_update_user(email):
 
     db.update_user(email, **updates)
     flash("User updated.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("users")
 
 
 @app.route("/api/users/<path:email>/delete", methods=["POST"])
@@ -372,7 +697,7 @@ def api_update_user(email):
 def api_delete_user(email):
     db.delete_user(email)
     flash("User deleted.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("users")
 
 
 @app.route("/api/users/<path:email>/lock", methods=["POST"])
@@ -381,7 +706,7 @@ def api_delete_user(email):
 def api_lock_user(email):
     db.lock_user(email, request.form.get("reason", "Locked by admin"))
     flash("User locked.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("users")
 
 
 @app.route("/api/users/<path:email>/unlock", methods=["POST"])
@@ -390,7 +715,7 @@ def api_lock_user(email):
 def api_unlock_user(email):
     db.unlock_user(email)
     flash("User unlocked.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("users")
 
 
 @app.route("/api/users/<path:email>/upload-students", methods=["POST"])
@@ -400,7 +725,7 @@ def api_upload_students_for_counselor(email):
     f = request.files.get("student_file")
     if not f or not f.filename:
         flash("No file selected.", "error")
-        return redirect(url_for("admin"))
+        return _redirect_admin_back("users")
     try:
         from core.dynamic_parser import parse_student_excel
         parsed = parse_student_excel(f)
@@ -411,7 +736,7 @@ def api_upload_students_for_counselor(email):
             flash("No valid students found.", "error")
     except Exception as e:
         flash(f"Upload failed: {e}", "error")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("users")
 
 
 @app.route("/api/users/<path:email>/force-logout", methods=["POST"])
@@ -420,7 +745,43 @@ def api_upload_students_for_counselor(email):
 def api_force_logout(email):
     db.force_logout_user(email, "admin_action")
     flash(f"Force-logged-out {email}.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("users")
+
+
+@app.route("/api/users/reset-password", methods=["POST"])
+@login_required
+@admin_required
+def api_admin_reset_password():
+    target_email = request.form.get("target_email", "").strip()
+    new_password = request.form.get("new_password", "")
+    confirm_password = request.form.get("confirm_password", "")
+    force_logout = request.form.get("force_logout") == "on"
+
+    if not target_email or not new_password or not confirm_password:
+        flash("User and both password fields are required.", "error")
+        return redirect(url_for("admin", tab="config"))
+
+    if new_password != confirm_password:
+        flash("New password and confirm password do not match.", "error")
+        return redirect(url_for("admin", tab="config"))
+
+    if len(new_password) < 6:
+        flash("Password must be at least 6 characters.", "error")
+        return redirect(url_for("admin", tab="config"))
+
+    user = db.get_user(target_email)
+    if not user:
+        flash("Selected user was not found.", "error")
+        return redirect(url_for("admin", tab="config"))
+
+    db.update_user(target_email, password=new_password)
+
+    # Security best-practice: invalidate existing sessions after password reset.
+    if force_logout and target_email != session.get("user_email"):
+        db.force_logout_user(target_email, "admin_password_reset")
+
+    flash(f"Password updated successfully for {target_email}.", "success")
+    return redirect(url_for("admin", tab="config"))
 
 
 @app.route("/api/admin/students/save", methods=["POST"])
@@ -437,12 +798,12 @@ def api_admin_save_student():
 
     if not counselor_email or not reg_no or not student_name:
         flash("Counselor, Register No and Student Name are required.", "error")
-        return redirect(url_for("admin", tab="users"))
+        return _redirect_admin_back("users", open_manage=counselor_email)
 
     counselor = db.get_user(counselor_email)
     if not counselor or counselor.get("role") != "counselor":
         flash("Invalid counselor selected.", "error")
-        return redirect(url_for("admin", tab="users"))
+        return _redirect_admin_back("users")
 
     try:
         if original_reg_no and original_reg_no != reg_no:
@@ -460,7 +821,7 @@ def api_admin_save_student():
     except Exception as e:
         flash(f"Could not save student: {e}", "error")
 
-    return redirect(url_for("admin", tab="users"))
+    return _redirect_admin_back("users", open_manage=counselor_email)
 
 
 @app.route("/api/admin/students/delete", methods=["POST"])
@@ -472,7 +833,7 @@ def api_admin_delete_student():
 
     if not counselor_email or not reg_no:
         flash("Counselor and Register No are required.", "error")
-        return redirect(url_for("admin", tab="users"))
+        return _redirect_admin_back("users", open_manage=counselor_email)
 
     try:
         db.delete_student(counselor_email, reg_no)
@@ -480,7 +841,30 @@ def api_admin_delete_student():
     except Exception as e:
         flash(f"Could not delete student: {e}", "error")
 
-    return redirect(url_for("admin", tab="users"))
+    return _redirect_admin_back("users", open_manage=counselor_email)
+
+
+@app.route("/api/admin/students/delete-all", methods=["POST"])
+@login_required
+@admin_required
+def api_admin_delete_all_students():
+    counselor_email = request.form.get("counselor_email", "").strip()
+    if not counselor_email:
+        flash("Counselor is required.", "error")
+        return _redirect_admin_back("users")
+
+    counselor = db.get_user(counselor_email)
+    if not counselor or counselor.get("role") != "counselor":
+        flash("Invalid counselor selected.", "error")
+        return _redirect_admin_back("users")
+
+    try:
+        db.delete_all_students(counselor_email)
+        flash(f"Deleted all students for {counselor.get('name')}", "success")
+    except Exception as e:
+        flash(f"Could not delete student list: {e}", "error")
+
+    return _redirect_admin_back("users", open_manage=counselor_email)
 
 
 # ---------- Departments -----------------------------------------------------
@@ -494,10 +878,10 @@ def api_create_department():
     color = request.form.get("color", "#667eea")
     if not code or not name:
         flash("Code and name are required.", "error")
-        return redirect(url_for("admin"))
+        return _redirect_admin_back("departments")
     ok, msg = db.create_department(code, name, color)
     flash(msg, "success" if ok else "error")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("departments")
 
 
 @app.route("/api/departments/<int:dept_id>/delete", methods=["POST"])
@@ -506,7 +890,7 @@ def api_create_department():
 def api_delete_department(dept_id):
     db.delete_department(dept_id)
     flash("Department deleted.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("departments")
 
 
 @app.route("/api/departments/<int:dept_id>/toggle", methods=["POST"])
@@ -516,7 +900,7 @@ def api_toggle_department(dept_id):
     is_active = request.form.get("is_active") == "1"
     db.update_department(dept_id, is_active=0 if is_active else 1)
     flash("Department updated.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("departments")
 
 
 # ---------- Sessions --------------------------------------------------------
@@ -528,7 +912,7 @@ def api_cleanup_sessions():
     db.cleanup_stale_sessions()
     db.clear_inactive_sessions()
     flash("Sessions cleaned.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("monitoring")
 
 
 @app.route("/api/sessions/logout-all", methods=["POST"])
@@ -537,7 +921,7 @@ def api_cleanup_sessions():
 def api_logout_all():
     db.logout_all_users()
     flash("All users logged out.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("monitoring")
 
 
 # ---------- App Configuration -----------------------------------------------
@@ -555,7 +939,7 @@ def api_update_config():
             settings["session_timeout"] = str(int(timeout))
         except ValueError:
             flash("Invalid session timeout value.", "error")
-            return redirect(url_for("admin"))
+            return _redirect_admin_back("config")
     
     # Heartbeat interval
     heartbeat = request.form.get("session_heartbeat_interval")
@@ -599,7 +983,7 @@ def api_update_config():
         db.update_app_config_bulk(settings)
         flash("Configuration updated successfully.", "success")
     
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("config")
 
 
 @app.route("/api/config/reset-theme", methods=["POST"])
@@ -626,7 +1010,7 @@ def api_reset_theme():
     }
     db.update_app_config_bulk(defaults)
     flash("All theme colors reset to defaults.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("config")
 
 
 # ---------- Activity Export -------------------------------------------------
@@ -811,7 +1195,26 @@ def api_delete_test(test_id):
         flash("Test deleted successfully.", "success")
     except Exception as e:
         flash(f"Failed to delete test: {e}", "error")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("tests")
+
+
+@app.route("/api/tests/<int:test_id>/update", methods=["POST"])
+@login_required
+@admin_required
+def api_update_test(test_id):
+    try:
+        db.update_test_metadata_fields(
+            test_id,
+            test_name=request.form.get("test_name", "").strip(),
+            semester=request.form.get("semester", "").strip(),
+            department=request.form.get("department", "").strip(),
+            batch_name=request.form.get("batch_name", "").strip(),
+            section=request.form.get("section", "").strip(),
+        )
+        flash("Test updated successfully.", "success")
+    except Exception as e:
+        flash(f"Failed to update test: {e}", "error")
+    return _redirect_admin_back("tests")
 
 
 @app.route("/api/tests/<int:test_id>/marks")
@@ -822,8 +1225,8 @@ def api_get_test_marks(test_id):
         # Access control: admin can view all, counselors can view only their uploads
         if session.get("role") != "admin":
             counselor_email = session.get("user_email")
-            allowed_tests = db.get_counselor_submissions(counselor_email, limit=500)
-            allowed_ids = {int(t.get("test_id")) for t in allowed_tests if t.get("test_id") is not None}
+            allowed_tests = db.get_visible_tests_for_counselor(counselor_email)
+            allowed_ids = {int(t.get("id")) for t in allowed_tests if t.get("id") is not None}
             if test_id not in allowed_ids:
                 return jsonify({"success": False, "error": "Access denied for this test."}), 403
 
@@ -845,22 +1248,28 @@ def api_tests_cleanup_duplicates():
             flash("No duplicate tests found.", "info")
     except Exception as e:
         flash(f"Failed to cleanup duplicates: {e}", "error")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("tests")
 
 
 @app.route("/api/marks/upload", methods=["POST"])
 @login_required
 def api_upload_marks():
     email = session["user_email"]
+    user = db.get_user(email) or {}
     f = request.files.get("marks_file")
     if not f or not f.filename:
         flash("No file selected.", "error")
         return redirect(url_for("counselor_page"))
 
     try:
+        file_bytes = f.read()
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
+        upload_mode = request.form.get("upload_mode", "new")
+        replace_test_id = request.form.get("replace_test_id", type=int)
+
         from core.intelligent_parser import IntelligentParser
         parser = IntelligentParser()
-        test_info, students = parser.parse_file(f, f.filename)
+        test_info, students = parser.parse_file(io.BytesIO(file_bytes), f.filename)
 
         if not students:
             flash("No student marks data found in file.", "error")
@@ -869,22 +1278,370 @@ def api_upload_marks():
         subjects = [s["name"] for s in test_info.subjects]
         student_data = [s.to_dict() for s in students]
 
+        if not subjects:
+            flash("UPLOAD BLOCKED: HEADER INTEGRITY FAILED - no subject columns detected. FILE NOT UPLOADED.", "warning")
+            return redirect(url_for("counselor_page", tab="reports"))
+
+        def _norm_dept(value):
+            return re.sub(r"[^A-Za-z0-9]", "", str(value or "").upper())
+
+        counselor_department = (user.get("department") or "").strip()
+        parsed_department = (test_info.department or "").strip()
+        if not counselor_department:
+            flash("UPLOAD BLOCKED: counselor department is not configured. Contact admin. FILE NOT UPLOADED.", "warning")
+            return redirect(url_for("counselor_page", tab="reports"))
+        if not parsed_department:
+            flash("UPLOAD BLOCKED: HEADER INTEGRITY FAILED - department not detected in marksheet header. FILE NOT UPLOADED.", "warning")
+            return redirect(url_for("counselor_page", tab="reports"))
+        if _norm_dept(parsed_department) != _norm_dept(counselor_department):
+            flash(
+                f"UPLOAD BLOCKED: NO MATCH - marksheet department '{parsed_department}' does not match your department '{counselor_department}'. FILE NOT UPLOADED.",
+                "warning",
+            )
+            return redirect(url_for("counselor_page", tab="reports"))
+
+        # Enforce counselor scope: only admin-assigned students whose Reg No + Name match.
+        def _norm_reg(value):
+            reg = str(value or "").strip().replace(" ", "")
+            if reg.endswith(".0"):
+                reg = reg[:-2]
+            return reg.upper()
+
+        def _norm_name(value):
+            name = str(value or "").strip().lower()
+            name = re.sub(r"\s+", " ", name)
+            return name
+
+        assigned_students = db.get_students(email)
+        assigned_map = {
+            _norm_reg(s.get("reg_no")): _norm_name(s.get("student_name"))
+            for s in assigned_students
+            if _norm_reg(s.get("reg_no"))
+        }
+
+        matched_students = []
+        mismatch_examples = []
+        mismatch_count = 0
+        for st in student_data:
+            reg = _norm_reg(st.get("reg_no"))
+            name = _norm_name(st.get("name"))
+            assigned_name = assigned_map.get(reg)
+            if not reg or not assigned_name:
+                mismatch_count += 1
+                if len(mismatch_examples) < 5:
+                    mismatch_examples.append(f"{st.get('reg_no', '')} ({st.get('name', '')})")
+                continue
+            if assigned_name != name:
+                mismatch_count += 1
+                if len(mismatch_examples) < 5:
+                    mismatch_examples.append(f"{st.get('reg_no', '')} ({st.get('name', '')})")
+                continue
+            st["reg_no"] = reg
+            matched_students.append(st)
+
+        if not matched_students:
+            sample = ", ".join(mismatch_examples) if mismatch_examples else "No valid rows"
+            flash(
+                f"UPLOAD BLOCKED: NO MATCH - no assigned students matched by Reg No + Name. Examples: {sample}. FILE NOT UPLOADED.",
+                "warning",
+            )
+            return redirect(url_for("counselor_page", tab="reports"))
+
+        total_rows = len(student_data)
+        if mismatch_count > 0:
+            sample = ", ".join(mismatch_examples) if mismatch_examples else "Check uploaded rows"
+            flash(
+                f"PARTIAL MATCH: scanned {total_rows} rows, matched {len(matched_students)}, skipped {mismatch_count} non-assigned/mismatched rows. Examples: {sample}.",
+                "warning",
+            )
+
+        student_data = matched_students
+
+        raw_test_name = (request.form.get("test_name") or test_info.test_name or "Unit Test").strip()
+
+        def _canonical_test_name(name):
+            n = re.sub(r"\s+", " ", str(name or "").strip().lower())
+            table = {
+                "unit test 1": "Unit Test 1",
+                "ut1": "Unit Test 1",
+                "unit test 2": "Unit Test 2",
+                "ut2": "Unit Test 2",
+                "iat 1": "IAT 1",
+                "internal assessment test 1": "IAT 1",
+                "iat 2": "IAT 2",
+                "internal assessment test 2": "IAT 2",
+                "model": "Model",
+                "model exam": "Model",
+                "model to be sent": "Model",
+            }
+            return table.get(n)
+
+        test_name = _canonical_test_name(raw_test_name) or raw_test_name or "Unit Test"
+
+        semester = (request.form.get("semester") or str(test_info.semester or "1")).strip()
+        batch_name = (request.form.get("batch_name") or test_info.batch_name or "").strip()
+        section = (request.form.get("section") or test_info.section or "").strip()
+        department = counselor_department
+
+        existing_test = db.find_existing_department_test(department, semester, test_name, batch_name=batch_name)
+        if existing_test and upload_mode != "replace":
+            if (existing_test.get("file_hash") or "") == file_hash:
+                flash("UPLOAD BLOCKED: DUPLICATE FILE for this department/test. FILE NOT UPLOADED.", "warning")
+                return redirect(url_for("counselor_page", tab="reports"))
+            replace_test_id = int(existing_test.get("test_id"))
+
+        if upload_mode == "replace" and not replace_test_id and existing_test:
+            replace_test_id = int(existing_test.get("test_id"))
+
         ok, msg = db.save_test_marks(
-            test_info.test_name or "Unit Test",
-            test_info.semester or "1",
+            test_name,
+            semester,
             email,
             student_data,
             subjects,
+            batch_name=batch_name,
+            department=department,
+            section=section,
+            file_hash=file_hash,
+            replace_test_id=replace_test_id,
+            sync_students=False,
         )
         if ok:
+            # Automatic duplicate cleanup after upload.
+            db.cleanup_duplicate_tests()
             latest_test_id = db.get_latest_test_id_for_counselor(email)
-            flash(f"Marks uploaded — {len(students)} students, {len(subjects)} subjects.", "success")
-            return redirect(url_for("counselor_page", tab="sendreports", test_id=latest_test_id or ""))
+            verb = "updated" if replace_test_id else "uploaded"
+            msg_text = f"Marks {verb} — scanned {total_rows} rows, uploaded {len(student_data)} assigned students, {len(subjects)} subjects."
+            flash(msg_text, "success")
+            return redirect(url_for("counselor_test_send_page", test_id=latest_test_id or replace_test_id))
         else:
-            flash(f"Error: {msg}", "error")
+            if "no match" in str(msg).lower():
+                flash(msg, "warning")
+            else:
+                flash(f"Error: {msg}", "error")
     except Exception as e:
         flash(f"Parse error: {e}", "error")
-    return redirect(url_for("counselor_page"))
+    return redirect(url_for("counselor_page", tab="reports"))
+
+
+def _can_access_test_for_user(test_id: int, user_email: str, role: str) -> bool:
+    if role == "admin":
+        return True
+    tests = db.get_visible_tests_for_counselor(user_email)
+    allowed_ids = {int(t.get("id")) for t in tests if t.get("id") is not None}
+    return test_id in allowed_ids
+
+
+@app.route("/counselor/tests/<int:test_id>/view")
+@login_required
+def counselor_test_view_page(test_id):
+    email = session.get("user_email")
+    role = session.get("role", "counselor")
+    if not _can_access_test_for_user(test_id, email, role):
+        flash("Access denied for this test.", "error")
+        return redirect(url_for("counselor_page", tab="reports"))
+
+    test_meta = db.get_test_metadata(test_id) or {}
+    grouped = db.get_test_marks_grouped(test_id)
+    if role != "admin":
+        def _norm_reg(value):
+            reg = str(value or "").strip().replace(" ", "")
+            if reg.endswith(".0"):
+                reg = reg[:-2]
+            return reg.upper()
+
+        allowed_reg_nos = {_norm_reg(s.get("reg_no", "")) for s in db.get_students(email)}
+        grouped["students"] = [
+            s for s in grouped.get("students", [])
+            if _norm_reg(s.get("reg_no", "")) in allowed_reg_nos
+        ]
+    return render_template(
+        "counselor_test_view.html",
+        test_id=test_id,
+        test_meta=test_meta,
+        subjects=grouped.get("subjects", []),
+        students=grouped.get("students", []),
+    )
+
+
+@app.route("/counselor/tests/<int:test_id>/send")
+@login_required
+def counselor_test_send_page(test_id):
+    email = session.get("user_email")
+    role = session.get("role", "counselor")
+    if not _can_access_test_for_user(test_id, email, role):
+        flash("Access denied for this test.", "error")
+        return redirect(url_for("counselor_page", tab="reports"))
+
+    user = db.get_user(email)
+    students = db.get_students(email)
+    def _norm_reg(value):
+        reg = str(value or "").strip().replace(" ", "")
+        if reg.endswith(".0"):
+            reg = reg[:-2]
+        return reg.upper()
+
+    by_reg = {_norm_reg(s.get("reg_no")): s for s in students}
+    grouped = db.get_test_marks_grouped(test_id)
+    test_meta = db.get_test_metadata(test_id) or {}
+    sent_reg_nos = {_norm_reg(r) for r in db.get_sent_reg_nos_for_test(email, test_id)}
+
+    rows = []
+    for sm in grouped.get("students", []):
+        reg_no = sm.get("reg_no")
+        norm_reg = _norm_reg(reg_no)
+        if norm_reg not in by_reg:
+            continue
+        stu = by_reg.get(norm_reg, {})
+        rows.append({
+            "reg_no": norm_reg,
+            "student_name": stu.get("student_name", reg_no),
+            "parent_phone": stu.get("parent_phone", ""),
+            "department": stu.get("department") or test_meta.get("department") or user.get("department") or "",
+            "marks": sm.get("marks", {}),
+            "status": "Generated" if norm_reg in sent_reg_nos else "Pending",
+        })
+
+    return render_template(
+        "counselor_send_results.html",
+        test_id=test_id,
+        test_meta=test_meta,
+        rows=rows,
+    )
+
+
+@app.route("/api/reports/send-single", methods=["POST"])
+@login_required
+def api_send_single_report():
+    email = session.get("user_email")
+    role = session.get("role", "counselor")
+    test_id = request.form.get("test_id", type=int)
+    reg_no = request.form.get("reg_no", "").strip()
+    action = request.form.get("action", "cancel")
+
+    if not test_id or not reg_no:
+        flash("Test and student are required.", "error")
+        return redirect(url_for("counselor_page", tab="reports"))
+
+    if not _can_access_test_for_user(test_id, email, role):
+        flash("Access denied for this test.", "error")
+        return redirect(url_for("counselor_page", tab="reports"))
+
+    is_ajax = request.form.get("ajax") == "1"
+
+    if action != "send":
+        flash("Message status kept as Pending.", "info")
+        if is_ajax:
+            return jsonify({"success": True, "status": "pending"})
+        return redirect(url_for("counselor_test_send_page", test_id=test_id))
+
+    user = db.get_user(email)
+    test_meta = db.get_test_metadata(test_id) or {}
+    students = db.get_students(email)
+    def _norm_reg(value):
+        reg = str(value or "").strip().replace(" ", "")
+        if reg.endswith(".0"):
+            reg = reg[:-2]
+        return reg.upper()
+
+    normalized_reg = _norm_reg(reg_no)
+    stu = next((s for s in students if _norm_reg(s.get("reg_no")) == normalized_reg), None)
+    if not stu:
+        flash("Student not found under your account.", "error")
+        return redirect(url_for("counselor_test_send_page", test_id=test_id))
+
+    marks = db.get_student_marks_for_reg(test_id, normalized_reg)
+    if not marks:
+        flash("No marks found for selected student.", "error")
+        return redirect(url_for("counselor_test_send_page", test_id=test_id))
+
+    from utils.whatsapp_helper import get_whatsapp_link
+    from utils.template_engine import TemplateEngine
+
+    template = request.form.get("message_template", "").strip() or (
+        "Dear Parent , The Following is the {test_name} Marks Secured in each Course by your son/daughter\n\n"
+        "REGISTER NUMBER :  {reg_no}\n"
+        "NAME : {student_name}\n\n"
+        "{subjects_table}\n\n"
+        "Regards\n"
+        "PRINCIPAL\n"
+        "RMKCET"
+    )
+
+    marks_table = _build_parent_subjects_table(marks)
+    effective_test_name = request.form.get("test_name") or (test_meta.get("test_name") or "Unit Test")
+    if request.form.get("message_template", "").strip():
+        msg = TemplateEngine.fill_template(
+            template,
+            app_name=APP_NAME,
+            reg_no=normalized_reg,
+            student_name=stu.get("student_name", normalized_reg),
+            department=request.form.get("department") or (test_meta.get("department") or stu.get("department", "")),
+            test_name=effective_test_name,
+            semester=request.form.get("semester") or (test_meta.get("semester") or "-"),
+            batch_name=request.form.get("batch_name") or (test_meta.get("batch_name") or "-"),
+            section=request.form.get("section") or (test_meta.get("section") or "-"),
+            subjects_table=marks_table,
+            counselor_name=user.get("name", "Counselor"),
+        )
+    else:
+        msg = _build_parent_message(
+            effective_test_name,
+            normalized_reg,
+            stu.get("student_name", normalized_reg),
+            marks,
+        )
+
+    def _clean_phone(value):
+        digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+        return digits[-10:] if len(digits) >= 10 else ""
+
+    def _clean_reg(value):
+        reg = str(value or "").strip().replace(" ", "")
+        if reg.endswith(".0"):
+            reg = reg[:-2]
+        return reg
+
+    phone = _clean_phone(stu.get("parent_phone", ""))
+    if not phone:
+        # Fallback for older uploads where phone may have been parsed into email-like field.
+        fallback_phone = _clean_phone(stu.get("parent_email", ""))
+        if fallback_phone:
+            phone = fallback_phone
+            try:
+                db.update_student(email, reg_no, parent_phone=phone)
+            except Exception:
+                pass
+
+    if not phone:
+        # Secondary fallback: recover from any duplicate/legacy student row with equivalent reg number.
+        target_reg = _clean_reg(reg_no)
+        for other in students:
+            if _clean_reg(other.get("reg_no")) != target_reg:
+                continue
+            alt_phone = _clean_phone(other.get("parent_phone")) or _clean_phone(other.get("parent_email"))
+            if alt_phone:
+                phone = alt_phone
+                try:
+                    db.update_student(email, reg_no, parent_phone=phone)
+                except Exception:
+                    pass
+                break
+
+    if not phone:
+        flash(f"Parent phone number missing for {reg_no}.", "error")
+        if is_ajax:
+            return jsonify({"success": False, "error": f"Parent phone number missing for {normalized_reg}."}), 400
+        return redirect(url_for("counselor_test_send_page", test_id=test_id))
+
+    wa = get_whatsapp_link(phone, msg)
+    db.log_message(email, normalized_reg, stu.get("student_name", ""), msg, "message", wa, test_id=test_id)
+
+    if is_ajax:
+        return jsonify({"success": True, "status": "generated", "wa_link": wa})
+
+    # Open WhatsApp compose URL so counselor can send immediately.
+    return redirect(wa)
 
 
 @app.route("/api/reports/generate", methods=["POST"])
@@ -904,7 +1661,7 @@ def api_generate_reports():
 
     if not test_id or not reg_nos:
         flash("Select a test and at least one student.", "error")
-        return redirect(url_for("counselor_page", tab="sendreports", test_id=test_id or ""))
+        return redirect(url_for("counselor_page", tab="reports", test_id=test_id or ""))
 
     test_id = int(test_id)
     user = db.get_user(email)
@@ -938,7 +1695,7 @@ def api_generate_reports():
         if not marks:
             continue
 
-        marks_table = "\n".join([f"- {subj}: {mark}" for subj, mark in marks.items()])
+        marks_table = _build_parent_subjects_table(marks)
         test_name = (test_meta or {}).get("test_name") or "Unit Test"
         semester = (test_meta or {}).get("semester") or "-"
         department = (test_meta or {}).get("department") or stu.get("department", "-")
@@ -958,18 +1715,7 @@ def api_generate_reports():
                 counselor_name=user["name"],
             )
         else:
-            msg = (
-                f"*RMKCET Parent Connect*\n"
-                f"Hello Parent,\n\n"
-                f"*Exam:* {test_name}\n"
-                f"*Semester:* {semester}\n"
-                f"*Department:* {department}\n"
-                f"*Batch:* {batch_name}\n\n"
-                f"*Student:* {stu.get('student_name', rn)}\n"
-                f"*Register No:* {rn}\n\n"
-                f"*Marks:*\n{marks_table}\n\n"
-                f"Regards,\n{user['name']}\nRMKCET"
-            )
+            msg = _build_parent_message(test_name, rn, stu.get('student_name', rn), marks)
 
         phone = stu.get("parent_phone", "")
         wa = get_whatsapp_link(phone, msg) if phone else ""
@@ -987,7 +1733,7 @@ def api_generate_reports():
     session["reports"] = reports
     session["report_test_id"] = test_id
     flash(f"Reports generated for {len(reports)} pending students.", "success")
-    return redirect(url_for("counselor_page", tab="sendreports", test_id=test_id))
+    return redirect(url_for("counselor_page", tab="reports", test_id=test_id))
 
 
 @app.route("/api/reports/pdf/<reg_no>")
@@ -1032,7 +1778,7 @@ def api_update_format_settings():
     bulk = request.form.get("bulk_format", "same_as_individual")
     db.update_format_settings(default, allowed, bulk, session["user_email"])
     flash("Format settings updated.", "success")
-    return redirect(url_for("admin"))
+    return _redirect_admin_back("config")
 
 
 # ---------- Static data assets ----------------------------------------------

@@ -1,9 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Counselor Dashboard - {{ app_name }}{% endblock %}
-{% block page_title %}Counselor Dashboard{% endblock %}
+{% block title %}Counselor Panel - {{ app_name }}{% endblock %}
+{% block page_title %}Counselor Panel{% endblock %}
 
 {% block content %}
-<!-- ============ METRICS ============ -->
 <div class="metrics-grid">
   <div class="metric-card">
     <div class="metric-label">My Students</div>
@@ -11,7 +10,7 @@
     <div class="metric-icon"><i class="fas fa-user-graduate"></i></div>
   </div>
   <div class="metric-card">
-    <div class="metric-label">Tests Available</div>
+    <div class="metric-label">Visible Tests</div>
     <div class="metric-value">{{ tests|length }}</div>
     <div class="metric-icon"><i class="fas fa-clipboard-check"></i></div>
   </div>
@@ -27,409 +26,178 @@
   </div>
 </div>
 
-<!-- ============ TABS ============ -->
-<div class="tabs" id="counselorTabs">
-  <button class="tab-btn active" data-tab="uploadmarks"><i class="fas fa-file-excel"></i> Upload Marks</button>
-  <button class="tab-btn" data-tab="sendreports"><i class="fas fa-paper-plane"></i> Send Reports</button>
-  <button class="tab-btn" data-tab="submissions"><i class="fas fa-clipboard-list"></i> Test History</button>
-  <button class="tab-btn" data-tab="history"><i class="fas fa-history"></i> History</button>
-</div>
+{% set current_tab = request.args.get('tab', 'reports') %}
 
-<!-- ==================== UPLOAD MARKS TAB ==================== -->
-<div class="tab-panel active" id="tab-uploadmarks">
-  <div class="card" style="max-width:560px;">
-    <div class="card-title"><i class="fas fa-file-excel"></i> Upload Marks Sheet</div>
-    <p style="font-size:.85rem;color:var(--text-dim);margin-bottom:16px;">
-      Upload the marks Excel file. The intelligent parser will automatically detect
-      test info, subjects, and student marks from the sheet structure.
-    </p>
+<div class="tab-panel {% if current_tab == 'reports' %}active{% endif %}" id="tab-reports">
+  <div class="card mb-3" style="max-width:860px;">
+    <div class="card-title"><i class="fas fa-file-excel"></i> Upload Department Marksheet</div>
+    <div class="d-flex align-center justify-between mb-2" style="gap:10px;flex-wrap:wrap;">
+      <span class="badge badge-info">Assigned Students: {{ assigned_students_count or 0 }}</span>
+      <span class="badge badge-warning">Match Required: Reg No + Name</span>
+    </div>
+    {% if (assigned_students_count or 0) == 0 %}
+    <div class="flash flash-warning" style="margin-bottom:12px;">
+      <i class="fas fa-exclamation-triangle"></i>
+      <span>No students assigned yet. Ask Admin to assign students before uploading marksheet.</span>
+    </div>
+    {% endif %}
     <form method="POST" action="{{ url_for('api_upload_marks') }}" enctype="multipart/form-data">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Test Name</label>
+          <input class="form-control" name="test_name" placeholder="Ex: Unit Test 1">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Semester</label>
+          <input class="form-control" name="semester" placeholder="Ex: 5">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Batch</label>
+          <input class="form-control" name="batch_name" placeholder="Ex: 2024-25">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Section</label>
+          <input class="form-control" name="section" placeholder="Ex: A">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Department</label>
+          <input class="form-control" name="department" value="{{ user.department or '' }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Upload Mode</label>
+          <select class="form-control" name="upload_mode" id="uploadMode" onchange="toggleReplaceTarget()">
+            <option value="new">Keep As New Test</option>
+            <option value="replace">Replace Existing Test</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-group" id="replaceTargetWrap" style="display:none;">
+        <label class="form-label">Replace Which Test</label>
+        <select class="form-control" name="replace_test_id">
+          <option value="">-- Select --</option>
+          {% for t in tests %}
+          <option value="{{ t.id }}">{{ t.test_name }}{% if t.batch_name %} ({{ t.batch_name }}){% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
       <div class="form-group">
         <div class="file-input-wrapper">
           <i class="fas fa-chart-bar"></i>
           <div class="file-text">Drop marks Excel file here or click to browse</div>
           <div class="file-name" id="marksFileLabel"></div>
-          <input type="file" name="marks_file" accept=".xlsx,.xls" required
-                 onchange="showFileName(this, 'marksFileLabel')">
+          <input type="file" name="marks_file" accept=".xlsx,.xls" required onchange="showFileName(this, 'marksFileLabel')">
         </div>
+        <p style="font-size:.8rem;color:var(--text-dim);margin-top:8px;">
+          Upload rule: only students already assigned by Admin with matching <strong>Reg No + Name</strong> are allowed.
+          If any row mismatches, upload will be blocked.
+        </p>
       </div>
-      <button type="submit" class="btn btn-primary"><i class="fas fa-upload"></i> Upload Marks</button>
-    </form>
-  </div>
-
-  {% if tests %}
-  <h3 class="section-title mt-3"><i class="fas fa-clipboard-list"></i> Uploaded Tests</h3>
-  <div class="table-wrapper">
-    <table>
-      <thead>
-        <tr><th>Test Name</th><th>Batch</th><th>Semester</th><th>Department</th></tr>
-      </thead>
-      <tbody>
-        {% for t in tests %}
-        <tr>
-          <td><strong>{{ t.test_name or t.t_name or 'Test #' ~ t.id }}</strong></td>
-          <td>{{ t.batch_name or '—' }}</td>
-          <td>{{ t.semester or '—' }}</td>
-          <td>{{ t.department or '—' }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% endif %}
-</div>
-
-<!-- ==================== SEND REPORTS TAB ==================== -->
-<div class="tab-panel" id="tab-sendreports">
-  {% if tests and students %}
-  <div class="card mb-3" style="max-width:900px;">
-    <div class="card-title"><i class="fas fa-paper-plane"></i> Generate & Send Reports</div>
-
-    <form method="GET" action="{{ url_for('counselor_page') }}" class="mb-2">
-      <input type="hidden" name="tab" value="sendreports">
-      <div class="form-row">
-        <div class="form-group" style="flex:2;">
-          <label class="form-label">Select Uploaded Test</label>
-          <select class="form-control" name="test_id" onchange="this.form.submit()" required>
-            <option value="">-- Select a test --</option>
-            {% for t in tests %}
-            <option value="{{ t.id }}" {% if selected_test_id == t.id %}selected{% endif %}>
-              {{ t.test_name or 'Test #' ~ t.id }}{% if t.batch_name %} ({{ t.batch_name }}){% endif %}
-            </option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="form-group" style="display:flex;align-items:flex-end;gap:8px;">
-          <span class="badge badge-success">Pending: {{ pending_students|length }}</span>
-          <span class="badge badge-info">Already Sent: {{ sent_count }}</span>
-        </div>
-      </div>
-    </form>
-
-    {% if selected_test_id %}
-    <form method="POST" action="{{ url_for('api_generate_reports') }}">
-      <input type="hidden" name="test_id" value="{{ selected_test_id }}">
-
-      <div class="card mb-2" style="padding:14px;">
-        <div class="card-title" style="font-size:.9rem;"><i class="fas fa-wand-magic-sparkles"></i> Parsed Exam Details (Editable)</div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Test Name</label>
-            <input type="text" class="form-control" name="edited_test_name" value="{{ (selected_test_meta or {}).get('test_name', '') }}">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Semester</label>
-            <input type="text" class="form-control" name="edited_semester" value="{{ (selected_test_meta or {}).get('semester', '') }}">
-          </div>
-        </div>
-        <div class="form-row">
-          <div class="form-group">
-            <label class="form-label">Department</label>
-            <input type="text" class="form-control" name="edited_department" value="{{ (selected_test_meta or {}).get('department', '') }}">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Batch / Academic Year</label>
-            <input type="text" class="form-control" name="edited_batch" value="{{ (selected_test_meta or {}).get('batch_name', '') }}">
-          </div>
-        </div>
-      </div>
-
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Select Students To Send</label>
-          <div style="max-height:280px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;">
-            <div class="form-check">
-              <input type="checkbox" id="selectAll" onchange="toggleAllStudents(this)">
-              <label for="selectAll" style="font-weight:700;color:var(--primary)">Select All Pending</label>
-            </div>
-            <hr class="divider" style="margin:8px 0;">
-            {% for s in pending_students %}
-            <div class="form-check">
-              <input type="checkbox" name="reg_nos" value="{{ s.reg_no }}" id="stu-{{ loop.index }}" class="student-check">
-              <label for="stu-{{ loop.index }}">{{ s.student_name }} ({{ s.reg_no }})</label>
-            </div>
-            {% endfor %}
-            {% if not pending_students %}
-            <div class="empty-state" style="padding:18px 10px;">
-              <i class="fas fa-check-circle"></i>
-              <h3>All Students Already Sent</h3>
-              <p>No pending students for this test.</p>
-            </div>
-            {% endif %}
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">WhatsApp Style Message</label>
-          <div class="wa-preview">
-            <div class="wa-chat-header">
-              <i class="fab fa-whatsapp"></i> Message Preview Template
-            </div>
-            <textarea class="form-control" name="custom_message_body" rows="12" placeholder="Use placeholders: {test_name} {semester} {department} {batch_name} {student_name} {reg_no} {subjects_table}">*RMKCET Parent Connect*
-Hello Parent,
-
-*Exam:* {test_name}
-*Semester:* {semester}
-*Department:* {department}
-*Batch:* {batch_name}
-
-*Student:* {student_name}
-*Register No:* {reg_no}
-
-*Marks:*
-{subjects_table}
-
-Regards,
-{counselor_name}
-RMKCET</textarea>
-          </div>
-
-          <div class="form-group mt-1">
-            <label class="form-label">Format</label>
-            <select class="form-control" name="format">
-              <option value="message">WhatsApp Message</option>
-              <option value="pdf">PDF Report</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <button type="submit" class="btn btn-primary" {% if not pending_students %}disabled{% endif %}>
-        <i class="fas fa-paper-plane"></i> Send Pending Reports
+      <button type="submit" class="btn btn-primary" {% if (assigned_students_count or 0) == 0 %}disabled title="No students assigned"{% endif %}>
+        <i class="fas fa-upload"></i> Upload
       </button>
     </form>
-    {% endif %}
   </div>
-  {% elif not tests %}
-  <div class="empty-state">
-    <i class="fas fa-chart-bar"></i>
-    <h3>No Tests Uploaded</h3>
-    <p>Upload a marks sheet first to generate reports.</p>
-  </div>
-  {% else %}
-  <div class="empty-state">
-    <i class="fas fa-user-graduate"></i>
-    <h3>No Students</h3>
-    <p>Upload a student list first.</p>
-  </div>
-  {% endif %}
 
-  <!-- Display generated reports -->
-  {% set reports = session.get('reports', []) %}
-  {% if reports %}
-  <h3 class="section-title mt-3"><i class="fas fa-check-circle text-success"></i> Generated Reports</h3>
-  {% for r in reports %}
-  <div class="report-card">
-    <h4>{{ r.name }} <span style="font-size:.8rem;color:var(--text-dim)">({{ r.reg_no }})</span></h4>
-    <div class="report-marks">
-      {% for subj, mark in r.marks.items() %}
-      <span class="mark-chip">{{ subj }}: <strong>{{ mark }}</strong></span>
-      {% endfor %}
-    </div>
-    <div class="btn-group">
-      {% if r.whatsapp_link %}
-      <a href="{{ r.whatsapp_link }}" target="_blank" class="wa-btn">
-        <i class="fab fa-whatsapp"></i> Send via WhatsApp
-      </a>
-      {% endif %}
-      {% if session.get('report_test_id') %}
-      <a href="{{ url_for('api_student_pdf', reg_no=r.reg_no, test_id=session.get('report_test_id')) }}"
-         class="btn btn-outline btn-sm"><i class="fas fa-file-pdf"></i> Download PDF</a>
-      {% endif %}
-    </div>
-  </div>
-  {% endfor %}
-  {% endif %}
-</div>
-
-<!-- ==================== MY SUBMISSIONS TAB ==================== -->
-<div class="tab-panel" id="tab-submissions">
-  <h3 class="section-title"><i class="fas fa-clipboard-list"></i> My Test History</h3>
-  
-  {% if submissions %}
-  <!-- Submission Statistics -->
-  <div class="metrics-grid mb-3">
-    <div class="metric-card">
-      <div class="metric-label">Total Submissions</div>
-      <div class="metric-value">{{ submissions|length }}</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">Total Students</div>
-      <div class="metric-value">{{ submissions|sum(attribute='student_count') }}</div>
-    </div>
-  </div>
-  
+  <h3 class="section-title"><i class="fas fa-clipboard-list"></i> My Uploaded Tests</h3>
   <div class="table-wrapper">
     <table>
       <thead>
         <tr>
           <th>Test Name</th>
           <th>Batch</th>
-          <th>Semester</th>
-          <th>Department</th>
+          <th>Sem</th>
+          <th>Section</th>
           <th>Students</th>
-          <th>Subjects</th>
-          <th>Uploaded At</th>
+          <th>Status</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody>
-        {% for sub in submissions %}
+        {% for t in tests %}
+        {% set generated = t.generated_count or 0 %}
+        {% set total = t.student_count or 0 %}
         <tr>
-          <td><strong>{{ sub.test_name or sub.t_name or 'Test #' ~ sub.test_id }}</strong></td>
-          <td>{{ sub.batch_name or '—' }}</td>
-          <td>{{ sub.semester or '—' }}</td>
-          <td>{{ sub.department or '—' }}</td>
-          <td><span class="badge badge-info">{{ sub.student_count or 0 }}</span></td>
+          <td><strong>{{ t.test_name or 'Test #' ~ t.id }}</strong></td>
+          <td>{{ t.batch_name or '—' }}</td>
+          <td>{{ t.semester or '—' }}</td>
+          <td>{{ t.section or '—' }}</td>
+          <td>{{ total }}</td>
           <td>
-            {% if sub.subjects_list %}
-            <div style="display:flex;flex-wrap:wrap;gap:4px;">
-              {% for subj in sub.subjects_list[:3] %}
-              <span class="badge badge-primary" style="font-size:.7rem;">{{ subj }}</span>
-              {% endfor %}
-              {% if sub.subjects_list|length > 3 %}
-              <span class="badge badge-muted" style="font-size:.7rem;">+{{ sub.subjects_list|length - 3 }} more</span>
-              {% endif %}
-            </div>
+            {% if generated > 0 %}
+            <span class="badge badge-success">Generated: {{ generated }}</span>
             {% else %}
-            —
+            <span class="badge badge-warning">Pending</span>
             {% endif %}
           </td>
-          <td style="font-size:.82rem">{{ (sub.uploaded_at or '')[:16] }}</td>
           <td>
-            <button class="btn btn-outline btn-sm" onclick="viewMarks({{ sub.test_id }}, '{{ sub.test_name|e }}')" title="View Marks">
-              <i class="fas fa-eye"></i>
-            </button>
+            <div class="btn-group">
+              <a class="btn btn-outline btn-sm" href="{{ url_for('counselor_test_view_page', test_id=t.id) }}">
+                <i class="fas fa-eye"></i> View
+              </a>
+              <a class="btn btn-primary btn-sm" href="{{ url_for('counselor_test_send_page', test_id=t.id) }}">
+                <i class="fas fa-paper-plane"></i> Send Results
+              </a>
+            </div>
           </td>
         </tr>
         {% endfor %}
+        {% if not tests %}
+        <tr><td colspan="7" class="text-center text-muted" style="padding:20px;">No visible tests yet.</td></tr>
+        {% endif %}
       </tbody>
     </table>
   </div>
-  {% else %}
-  <div class="empty-state">
-    <i class="fas fa-clipboard"></i>
-    <h3>No Submissions Yet</h3>
-    <p>Your marksheet uploads will appear here after you upload them.</p>
-  </div>
-  {% endif %}
 </div>
 
-<!-- Marks View Modal -->
-<div class="modal-overlay" id="modal-marks-view">
-  <div class="modal" style="max-width:900px;max-height:85vh;">
-    <div class="modal-header">
-      <h3><i class="fas fa-table"></i> <span id="marksModalTitle">Test Marks</span></h3>
-      <button class="modal-close" onclick="closeModal('marks-view')">&times;</button>
-    </div>
-    <div id="marksTableContainer" style="overflow:auto;max-height:60vh;">
-      <div class="text-center" style="padding:24px;color:var(--text-dim);">
-        <i class="fas fa-spinner fa-spin"></i> Loading marks...
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ==================== HISTORY TAB ==================== -->
-<div class="tab-panel" id="tab-history">
-  <h3 class="section-title"><i class="fas fa-history"></i> Message History</h3>
-  {% if msg_history %}
+<div class="tab-panel {% if current_tab == 'history' %}active{% endif %}" id="tab-history">
+  <h3 class="section-title"><i class="fas fa-history"></i> Sent History</h3>
   <div class="table-wrapper">
     <table>
       <thead>
-        <tr><th>Student</th><th>Reg No</th><th>Format</th><th>Sent At</th><th>Status</th></tr>
+        <tr>
+          <th>Roll No</th>
+          <th>Name</th>
+          <th>Status</th>
+          <th>Sent At</th>
+        </tr>
       </thead>
       <tbody>
         {% for m in msg_history %}
         <tr>
-          <td>{{ m.student_name }}</td>
           <td><strong>{{ m.reg_no }}</strong></td>
-          <td><span class="badge badge-info">{{ m.format }}</span></td>
+          <td>{{ m.student_name }}</td>
+          <td>
+            {% if (m.status or '')|lower in ['sent', 'generated'] %}
+            <span class="badge badge-success">Generated</span>
+            {% else %}
+            <span class="badge badge-warning">Pending</span>
+            {% endif %}
+          </td>
           <td style="font-size:.82rem">{{ (m.sent_at or '')[:19] }}</td>
-          <td><span class="badge badge-success">{{ m.status }}</span></td>
         </tr>
         {% endfor %}
+        {% if not msg_history %}
+        <tr><td colspan="4" class="text-center text-muted" style="padding:20px;">No history available.</td></tr>
+        {% endif %}
       </tbody>
     </table>
-  </div>
-  {% else %}
-  <div class="empty-state">
-    <i class="fas fa-envelope-open-text"></i>
-    <h3>No Messages Yet</h3>
-    <p>Generated reports will appear here.</p>
-  </div>
-  {% endif %}
-
-  <!-- Stats cards -->
-  <div class="metrics-grid mt-3">
-    <div class="metric-card">
-      <div class="metric-label">Total Sent</div>
-      <div class="metric-value">{{ msg_stats.total }}</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">Today</div>
-      <div class="metric-value">{{ msg_stats.today }}</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">This Week</div>
-      <div class="metric-value">{{ msg_stats.week }}</div>
-    </div>
-    <div class="metric-card">
-      <div class="metric-label">Unique Students</div>
-      <div class="metric-value">{{ msg_stats.unique }}</div>
-    </div>
   </div>
 </div>
 {% endblock %}
 
 {% block scripts %}
 <script>
-function toggleAllStudents(master) {
-  document.querySelectorAll('.student-check').forEach(cb => {
-    cb.checked = master.checked;
-  });
+function toggleReplaceTarget() {
+  const mode = document.getElementById('uploadMode');
+  const wrap = document.getElementById('replaceTargetWrap');
+  if (!mode || !wrap) return;
+  wrap.style.display = mode.value === 'replace' ? '' : 'none';
 }
 
-async function viewMarks(testId, testName) {
-  document.getElementById('marksModalTitle').textContent = testName || ('Test #' + testId);
-  const container = document.getElementById('marksTableContainer');
-  container.innerHTML = '<div class="text-center" style="padding:24px;color:var(--text-dim);"><i class="fas fa-spinner fa-spin"></i> Loading marks...</div>';
-  openModal('marks-view');
-
-  try {
-    const res = await fetch(`/api/tests/${testId}/marks`);
-    const payload = await res.json();
-    if (!payload.success) {
-      container.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-triangle"></i><h3>Unable to load marks</h3><p>${payload.error || 'Unknown error'}</p></div>`;
-      return;
-    }
-
-    const subjects = payload.data.subjects || [];
-    const students = payload.data.students || [];
-
-    if (!students.length) {
-      container.innerHTML = '<div class="empty-state"><i class="fas fa-table"></i><h3>No marks available</h3><p>No student marks were found for this test.</p></div>';
-      return;
-    }
-
-    let html = '<table><thead><tr><th>Reg No</th><th>Department</th>';
-    subjects.forEach(s => { html += `<th>${s}</th>`; });
-    html += '</tr></thead><tbody>';
-
-    students.forEach(stu => {
-      html += `<tr><td><strong>${stu.reg_no || '-'}</strong></td><td>${stu.department || '-'}</td>`;
-      subjects.forEach(sub => {
-        const mark = (stu.marks && stu.marks[sub] !== undefined) ? stu.marks[sub] : '-';
-        html += `<td>${mark}</td>`;
-      });
-      html += '</tr>';
-    });
-
-    html += '</tbody></table>';
-    container.innerHTML = html;
-  } catch (err) {
-    container.innerHTML = `<div class="empty-state"><i class="fas fa-exclamation-circle"></i><h3>Network error</h3><p>${err.message || 'Failed to fetch marks'}</p></div>`;
-  }
-}
+document.addEventListener('DOMContentLoaded', toggleReplaceTarget);
 </script>
 {% endblock %}

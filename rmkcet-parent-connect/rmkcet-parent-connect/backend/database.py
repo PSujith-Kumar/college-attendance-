@@ -7,6 +7,7 @@ import sqlite3
 import hashlib
 import json
 import os
+import re
 from datetime import datetime, timedelta
 from config import DATABASE_FILE, DATA_DIR, DEFAULT_DEPARTMENTS, DEFAULT_ADMIN
 
@@ -142,6 +143,8 @@ def init_database():
         semester INTEGER,
         test_name TEXT,
         department TEXT,
+        section TEXT,
+        file_hash TEXT,
         academic_year TEXT,
         subjects TEXT,
         subject_columns TEXT,
@@ -221,6 +224,7 @@ def init_database():
     # Run migrations for existing DBs
     ensure_sent_messages_test_id_column()
     ensure_can_upload_students_column()
+    ensure_test_metadata_columns()
     return True
 
 
@@ -884,7 +888,7 @@ def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=No
     rows = conn.execute("""
         SELECT t.id, t.test_name as t_name, t.test_date,
                tm.id as tm_id, tm.test_id, tm.test_name, tm.batch_name, tm.semester,
-               tm.department, tm.uploaded_at, tm.uploaded_by, tm.subjects,
+             tm.department, tm.section, tm.uploaded_at, tm.uploaded_by, tm.subjects,
                u.name as uploaded_by_name,
                (SELECT COUNT(DISTINCT sm.reg_no) FROM student_marks sm WHERE sm.test_id = t.id) as student_count,
                0 as is_duplicate
@@ -905,6 +909,7 @@ def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=No
         batch_val = str(d.get("batch_name") or "")
         sem_val = str(d.get("semester") or "")
         dept_val = str(d.get("department") or "")
+        section_val = str(d.get("section") or "")
         counselor_val = str(d.get("uploaded_by") or "")
         if filter_batch and batch_val != str(filter_batch):
             continue
@@ -928,11 +933,12 @@ def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=No
             batch_val.strip().lower(),
             sem_val.strip().lower(),
             dept_val.strip().lower(),
+            section_val.strip().lower(),
         )
 
         # If no metadata fields exist, use concrete test id to avoid collapsing unrelated rows.
         if not any(key):
-            key = (f"id:{d.get('id')}", "", "", "")
+            key = (f"id:{d.get('id')}", "", "", "", "")
 
         if key in seen:
             continue
@@ -1027,11 +1033,26 @@ def add_students_bulk(counselor_email, students):
     added = 0
     for s in students:
         try:
-            conn.execute("""INSERT OR REPLACE INTO counselor_students
-                            (counselor_email, reg_no, student_name, department, parent_phone, parent_email)
-                            VALUES (?,?,?,?,?,?)""",
-                         (counselor_email, s.get("reg_no", ""), s.get("name", ""),
-                          s.get("department", ""), s.get("phone", ""), s.get("email", "")))
+            conn.execute("""
+                INSERT INTO counselor_students
+                (counselor_email, reg_no, student_name, department, parent_phone, parent_email)
+                VALUES (?,?,?,?,?,?)
+                ON CONFLICT(counselor_email, reg_no) DO UPDATE SET
+                    student_name=excluded.student_name,
+                    department=COALESCE(NULLIF(excluded.department, ''), counselor_students.department),
+                    parent_phone=COALESCE(NULLIF(excluded.parent_phone, ''), counselor_students.parent_phone),
+                    parent_email=COALESCE(NULLIF(excluded.parent_email, ''), counselor_students.parent_email),
+                    is_active=1,
+                    uploaded_at=CURRENT_TIMESTAMP
+            """,
+            (
+                counselor_email,
+                s.get("reg_no", ""),
+                s.get("name", ""),
+                s.get("department", ""),
+                s.get("phone", ""),
+                s.get("email", ""),
+            ))
             added += 1
         except Exception:
             continue
@@ -1128,7 +1149,7 @@ def get_latest_test_id_for_counselor(counselor_email):
     return int(row["test_id"]) if row and row.get("test_id") is not None else None
 
 
-def update_test_metadata_fields(test_id, test_name=None, semester=None, department=None, batch_name=None):
+def update_test_metadata_fields(test_id, test_name=None, semester=None, department=None, batch_name=None, section=None):
     """Allow edits to parsed test metadata before sending reports."""
     conn = get_conn()
     sets = []
@@ -1145,10 +1166,15 @@ def update_test_metadata_fields(test_id, test_name=None, semester=None, departme
     if batch_name is not None:
         sets.append("batch_name=?")
         vals.append(batch_name)
+    if section is not None:
+        sets.append("section=?")
+        vals.append(section)
 
     if sets:
         vals.append(test_id)
         conn.execute(f"UPDATE test_metadata SET {','.join(sets)} WHERE test_id=?", vals)
+        if test_name is not None:
+            conn.execute("UPDATE tests SET test_name=? WHERE id=?", (test_name, test_id))
         conn.commit()
     conn.close()
     return True
@@ -1243,11 +1269,12 @@ def get_tests():
 def save_test_metadata(test_id, metadata: dict):
     conn = get_conn()
     conn.execute("""INSERT OR REPLACE INTO test_metadata
-                    (test_id, batch_name, semester, test_name, department, academic_year,
+                                        (test_id, batch_name, semester, test_name, department, section, file_hash, academic_year,
                      subjects, subject_columns, header_row, data_start_row, uploaded_at, uploaded_by)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                  (test_id, metadata.get("batch_name"), metadata.get("semester"),
                   metadata.get("test_name"), metadata.get("department"),
+                                    metadata.get("section"), metadata.get("file_hash"),
                   metadata.get("academic_year"), json.dumps(metadata.get("subjects", [])),
                   json.dumps(metadata.get("subject_columns", {})),
                   metadata.get("header_row"), metadata.get("data_start_row", 7),
@@ -1376,6 +1403,92 @@ def get_message_history(counselor_email=None, limit=100):
     return [dict(r) for r in rows]
 
 
+def get_message_history_filtered(day=None, counselor_query=None, limit=500):
+    """Admin-facing message history with optional day and counselor-name filters."""
+    conn = get_conn()
+    where = []
+    params = []
+
+    if day:
+        where.append("DATE(sm.sent_at)=?")
+        params.append(str(day))
+
+    if counselor_query:
+        q = f"%{str(counselor_query).strip().lower()}%"
+        where.append("(LOWER(COALESCE(u.name, '')) LIKE ? OR LOWER(COALESCE(sm.counselor_email, '')) LIKE ?)")
+        params.extend([q, q])
+
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = "LIMIT ?"
+        params.append(int(limit))
+
+    rows = conn.execute(
+        f"""
+        SELECT sm.*, u.name AS counselor_name
+        FROM sent_messages sm
+        LEFT JOIN users u ON sm.counselor_email = u.email
+        {where_sql}
+        ORDER BY sm.sent_at DESC
+        {limit_sql}
+        """,
+        params,
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_message_days(counselor_query=None):
+    """Return available message dates with counts for day-wise navigation."""
+    conn = get_conn()
+    where = ""
+    params = []
+    if counselor_query:
+        q = f"%{str(counselor_query).strip().lower()}%"
+        where = "WHERE (LOWER(COALESCE(u.name, '')) LIKE ? OR LOWER(COALESCE(sm.counselor_email, '')) LIKE ?)"
+        params.extend([q, q])
+
+    rows = conn.execute(
+        f"""
+        SELECT COALESCE(DATE(sm.sent_at), 'Unknown') AS day,
+               COUNT(*) AS total,
+               COUNT(DISTINCT sm.counselor_email) AS counselors
+        FROM sent_messages sm
+        LEFT JOIN users u ON sm.counselor_email = u.email
+        {where}
+        GROUP BY DATE(sm.sent_at)
+        ORDER BY day DESC
+        """,
+        params,
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def delete_message_by_id(message_id):
+    conn = get_conn()
+    cur = conn.execute("DELETE FROM sent_messages WHERE id=?", (int(message_id),))
+    conn.commit()
+    affected = cur.rowcount
+    conn.close()
+    return affected
+
+
+def delete_messages_by_ids(message_ids):
+    ids = [int(x) for x in (message_ids or []) if str(x).strip().isdigit()]
+    if not ids:
+        return 0
+
+    placeholders = ",".join(["?"] * len(ids))
+    conn = get_conn()
+    cur = conn.execute(f"DELETE FROM sent_messages WHERE id IN ({placeholders})", ids)
+    conn.commit()
+    affected = cur.rowcount
+    conn.close()
+    return affected
+
+
 def get_message_stats(counselor_email=None):
     conn = get_conn()
     if counselor_email:
@@ -1463,7 +1576,7 @@ def get_students_by_counselor(counselor_email):
 
 
 def get_tests_by_counselor(counselor_email):
-    """Get tests that have marks uploaded by this counselor."""
+    """Get department-visible tests that contain marks for this counselor's assigned students."""
     conn = get_conn()
     rows = conn.execute("""
         SELECT DISTINCT t.id,
@@ -1471,12 +1584,27 @@ def get_tests_by_counselor(counselor_email):
                COALESCE(tm.semester, '') as semester,
                COALESCE(tm.department, '') as department,
                COALESCE(tm.batch_name, '') as batch_name,
+               COALESCE(tm.section, '') as section,
                tm.uploaded_at
+               ,(SELECT COUNT(DISTINCT sm.reg_no)
+                   FROM student_marks sm
+                   JOIN counselor_students cs ON cs.reg_no = sm.reg_no
+                   WHERE sm.test_id = t.id AND cs.counselor_email = ?) as student_count
+               ,(SELECT COUNT(DISTINCT s2.reg_no)
+                   FROM sent_messages s2
+                   WHERE s2.test_id = t.id AND s2.counselor_email = ?) as generated_count
         FROM tests t
-        LEFT JOIN test_metadata tm ON t.id = tm.test_id
-        WHERE tm.uploaded_by = ?
+        JOIN test_metadata tm ON t.id = tm.test_id
+        JOIN users u ON u.email = ?
+        WHERE COALESCE(tm.department, '') = COALESCE(u.department, '')
+          AND EXISTS (
+              SELECT 1
+              FROM student_marks sm
+              JOIN counselor_students cs ON cs.reg_no = sm.reg_no
+              WHERE sm.test_id = t.id AND cs.counselor_email = ?
+          )
         ORDER BY tm.uploaded_at DESC, t.id DESC
-    """, (counselor_email,)).fetchall()
+        """, (counselor_email, counselor_email, counselor_email, counselor_email)).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
@@ -1486,7 +1614,91 @@ def get_marks_by_test(test_id):
     return get_test_marks(test_id)
 
 
-def save_test_marks(test_name, semester, counselor_email, students, subjects):
+def find_test_by_hash(file_hash, uploaded_by=None):
+    """Find a previously uploaded test by file hash."""
+    if not file_hash:
+        return None
+    conn = get_conn()
+    if uploaded_by:
+        row = conn.execute(
+            """SELECT tm.test_id, tm.uploaded_by, tm.test_name, tm.batch_name, tm.semester, tm.department
+               FROM test_metadata tm
+               WHERE tm.file_hash=? AND tm.uploaded_by=?
+               ORDER BY tm.uploaded_at DESC LIMIT 1""",
+            (file_hash, uploaded_by),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """SELECT tm.test_id, tm.uploaded_by, tm.test_name, tm.batch_name, tm.semester, tm.department
+               FROM test_metadata tm
+               WHERE tm.file_hash=?
+               ORDER BY tm.uploaded_at DESC LIMIT 1""",
+            (file_hash,),
+        ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_visible_tests_for_counselor(counselor_email):
+    """Return department-visible tests that contain marks for allocated students."""
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT t.id,
+               COALESCE(tm.test_name, t.test_name) AS test_name,
+               COALESCE(tm.semester, '') AS semester,
+               COALESCE(tm.department, '') AS department,
+               COALESCE(tm.batch_name, '') AS batch_name,
+               COALESCE(tm.section, '') AS section,
+               tm.uploaded_at,
+               (SELECT COUNT(DISTINCT sm.reg_no)
+                   FROM student_marks sm
+                   JOIN counselor_students cs ON cs.reg_no = sm.reg_no
+                   WHERE sm.test_id = t.id AND cs.counselor_email = ?) as student_count,
+               (SELECT COUNT(DISTINCT s2.reg_no)
+                   FROM sent_messages s2
+                   WHERE s2.test_id = t.id AND s2.counselor_email = ?) as generated_count
+        FROM tests t
+        JOIN test_metadata tm ON t.id = tm.test_id
+        JOIN users u ON u.email = ?
+        WHERE COALESCE(tm.department, '') = COALESCE(u.department, '')
+          AND EXISTS (
+              SELECT 1
+              FROM student_marks sm
+              JOIN counselor_students cs ON cs.reg_no = sm.reg_no
+              WHERE sm.test_id = t.id AND cs.counselor_email = ?
+          )
+        ORDER BY tm.uploaded_at DESC, t.id DESC
+        """,
+        (counselor_email, counselor_email, counselor_email, counselor_email),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def find_existing_department_test(department, semester, test_name, batch_name=None):
+    """Find latest existing test for the same department-semester-test tuple."""
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT tm.test_id, tm.file_hash, tm.uploaded_by, tm.uploaded_at
+        FROM test_metadata tm
+        WHERE LOWER(COALESCE(tm.department, '')) = LOWER(COALESCE(?, ''))
+          AND LOWER(COALESCE(tm.semester, '')) = LOWER(COALESCE(?, ''))
+          AND LOWER(COALESCE(tm.test_name, '')) = LOWER(COALESCE(?, ''))
+          AND LOWER(COALESCE(tm.batch_name, '')) = LOWER(COALESCE(?, ''))
+        ORDER BY tm.uploaded_at DESC, tm.test_id DESC
+        LIMIT 1
+        """,
+        (department, str(semester), test_name, batch_name or ""),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def save_test_marks(test_name, semester, counselor_email, students, subjects,
+                    batch_name=None, department=None, section=None,
+                    file_hash=None, replace_test_id=None, sync_students=True):
     """
     High-level wrapper to create a test and save marks.
     students: list of dicts with 'reg_no', 'name', 'marks' (dict of subject: mark)
@@ -1494,10 +1706,48 @@ def save_test_marks(test_name, semester, counselor_email, students, subjects):
     """
     conn = get_conn()
     try:
+        # Hard guard: uploaded rows must match assigned counselor students by Reg No + Name.
+        def _norm_reg(value):
+            reg = str(value or "").strip().replace(" ", "")
+            if reg.endswith(".0"):
+                reg = reg[:-2]
+            return reg.upper()
+
+        def _norm_name(value):
+            name = str(value or "").strip().lower()
+            name = re.sub(r"\s+", " ", name)
+            return name
+
+        assigned_rows = conn.execute(
+            "SELECT reg_no, student_name FROM counselor_students WHERE counselor_email=?",
+            (counselor_email,),
+        ).fetchall()
+        assigned_map = {
+            _norm_reg(r["reg_no"]): _norm_name(r["student_name"])
+            for r in assigned_rows
+            if _norm_reg(r["reg_no"])
+        }
+
+        if not assigned_map:
+            return False, "No match: no students assigned to this counselor."
+
+        mismatch_samples = []
+        for student in students:
+            reg = _norm_reg(student.get("reg_no"))
+            name = _norm_name(student.get("name"))
+            assigned_name = assigned_map.get(reg)
+            if not reg or not assigned_name or not name or assigned_name != name:
+                if len(mismatch_samples) < 5:
+                    mismatch_samples.append(f"{student.get('reg_no', '')} ({student.get('name', '')})")
+
+        if mismatch_samples:
+            return False, f"No match: uploaded rows do not match assigned list (Reg No + Name). Examples: {', '.join(mismatch_samples)}"
+
         # Get or create batch/semester
         yr = datetime.now().year
-        batch_name = f"{yr}-{str(yr + 1)[-2:]}"
-        batch_id = get_or_create_batch(batch_name)
+        default_batch_name = f"{yr}-{str(yr + 1)[-2:]}"
+        chosen_batch_name = (batch_name or default_batch_name).strip()
+        batch_id = get_or_create_batch(chosen_batch_name)
 
         sem_num = 1
         try:
@@ -1506,17 +1756,49 @@ def save_test_marks(test_name, semester, counselor_email, students, subjects):
             pass
         semester_id = get_or_create_semester(batch_id, sem_num)
 
-        # Create test
-        test_id = create_test(semester_id, test_name)
+        # Create test or replace existing test content
+        if replace_test_id:
+            test_id = int(replace_test_id)
+            conn.execute("DELETE FROM student_marks WHERE test_id=?", (test_id,))
+            conn.execute("DELETE FROM test_metadata WHERE test_id=?", (test_id,))
+            conn.execute("UPDATE tests SET semester_id=?, test_name=? WHERE id=?", (semester_id, test_name, test_id))
+        else:
+            test_id = create_test(semester_id, test_name)
 
         # Save metadata
+        if not department:
+            department = next((s.get("department", "") for s in students if s.get("department")), "")
+        if not section:
+            section = next((s.get("section", "") for s in students if s.get("section")), "")
+
         save_test_metadata(test_id, {
-            "batch_name": batch_name,
+            "batch_name": chosen_batch_name,
             "semester": semester,
             "test_name": test_name,
+            "department": department,
+            "section": section,
+            "file_hash": file_hash,
             "subjects": subjects,
             "uploaded_by": counselor_email,
         })
+
+        # Optionally sync roster/contact details from marksheet.
+        if sync_students:
+            roster = []
+            for student in students:
+                reg = str(student.get("reg_no", "")).strip()
+                name = str(student.get("name", "")).strip() or reg
+                if not reg:
+                    continue
+                roster.append({
+                    "reg_no": reg,
+                    "name": name,
+                    "department": student.get("department", "") or department or "",
+                    "phone": student.get("phone", ""),
+                    "email": student.get("email", ""),
+                })
+            if roster:
+                add_students_bulk(counselor_email, roster)
 
         # Save marks
         marks_data = []
@@ -1536,6 +1818,8 @@ def save_test_marks(test_name, semester, counselor_email, students, subjects):
         return True, f"Saved marks for {len(students)} students"
     except Exception as e:
         return False, str(e)
+    finally:
+        conn.close()
 
 
 def get_format_settings_list(active_only=False):
@@ -1773,6 +2057,23 @@ def ensure_sent_messages_test_id_column():
         conn.execute("SELECT test_id FROM sent_messages LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE sent_messages ADD COLUMN test_id INTEGER")
+        conn.commit()
+    conn.close()
+
+
+def ensure_test_metadata_columns():
+    """Backfill columns added after first release."""
+    conn = get_conn()
+    try:
+        conn.execute("SELECT section FROM test_metadata LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE test_metadata ADD COLUMN section TEXT")
+        conn.commit()
+
+    try:
+        conn.execute("SELECT file_hash FROM test_metadata LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE test_metadata ADD COLUMN file_hash TEXT")
         conn.commit()
     conn.close()
 

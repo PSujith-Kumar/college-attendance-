@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}View Test - {{ app_name }}{% endblock %}
+{% block page_title %}Test Performance{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-between align-center mb-2">
+  <a href="{{ url_for('counselor_page', tab='reports') }}" class="btn btn-outline btn-sm"><i class="fas fa-arrow-left"></i> Back</a>
+  <span class="badge badge-info">Test ID: {{ test_id }}</span>
+</div>
+
+<div class="card mb-2">
+  <div class="card-title"><i class="fas fa-clipboard-check"></i> {{ test_meta.test_name or ('Test #' ~ test_id) }}</div>
+  <div class="form-row">
+    <div><strong>Semester:</strong> {{ test_meta.semester or '—' }}</div>
+    <div><strong>Batch:</strong> {{ test_meta.batch_name or '—' }}</div>
+  </div>
+  <div class="form-row mt-1">
+    <div><strong>Department:</strong> {{ test_meta.department or '—' }}</div>
+    <div><strong>Section:</strong> {{ test_meta.section or '—' }}</div>
+  </div>
+</div>
+
+<div class="table-wrapper">
+  <table>
+    <thead>
+      <tr>
+        <th>Reg No</th>
+        <th>Department</th>
+        {% for s in subjects %}
+        <th>{{ s }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for st in students %}
+      <tr>
+        <td><strong>{{ st.reg_no }}</strong></td>
+        <td>{{ st.department or '—' }}</td>
+        {% for s in subjects %}
+        <td>{{ st.marks.get(s, '-') }}</td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+      {% if not students %}
+      <tr><td colspan="{{ 2 + (subjects|length) }}" class="text-center text-muted" style="padding:18px;">No student marks found.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

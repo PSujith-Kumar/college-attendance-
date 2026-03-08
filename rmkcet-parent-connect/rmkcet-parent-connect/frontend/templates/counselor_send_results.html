@@ -1,0 +1,353 @@
+{% extends "base.html" %}
+{% block title %}Send Results - {{ app_name }}{% endblock %}
+{% block page_title %}Send Results{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-between align-center mb-2" style="gap:12px;">
+  <a href="{{ url_for('counselor_page', tab='reports') }}" class="btn btn-outline btn-sm"><i class="fas fa-arrow-left"></i> Back</a>
+  <span class="badge badge-info">Test ID: {{ test_id }}</span>
+</div>
+
+<div class="card mb-3">
+  <div class="card-title"><i class="fas fa-sliders"></i> Common Variables</div>
+  <div class="form-row">
+    <div class="form-group">
+      <label class="form-label">Test</label>
+      <input id="varTestName" class="form-control" value="{{ test_meta.test_name or '' }}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Semester</label>
+      <input id="varSemester" class="form-control" value="{{ test_meta.semester or '' }}">
+    </div>
+  </div>
+  <div class="form-row">
+    <div class="form-group">
+      <label class="form-label">Batch</label>
+      <input id="varBatch" class="form-control" value="{{ test_meta.batch_name or '' }}">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Section</label>
+      <input id="varSection" class="form-control" value="{{ test_meta.section or '' }}">
+    </div>
+  </div>
+  <div class="form-group">
+    <label class="form-label">Message Template</label>
+    <textarea id="varTemplate" class="form-control" rows="8">Dear Parent , The Following is the {test_name} Marks Secured in each Course by your son/daughter
+
+  REGISTER NUMBER :  {reg_no}
+  NAME : {student_name}
+
+  {subjects_table}
+
+  Regards
+  PRINCIPAL
+  RMKCET</textarea>
+  </div>
+</div>
+
+<div class="table-wrapper">
+  <table>
+    <thead>
+      <tr>
+        <th>Reg No</th>
+        <th>Name</th>
+        <th>Phone</th>
+        <th>Status</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td><strong>{{ r.reg_no }}</strong></td>
+        <td>{{ r.student_name }}</td>
+        <td>{{ r.parent_phone or '—' }}</td>
+        <td>
+          {% if r.status == 'Generated' %}
+          <span class="badge badge-success">Generated</span>
+          {% else %}
+          <span class="badge badge-warning">Pending</span>
+          {% endif %}
+        </td>
+        <td>
+          <button
+            class="btn btn-primary btn-sm"
+            onclick="openSendPreview(this)"
+            data-test-id="{{ test_id }}"
+            data-reg-no="{{ r.reg_no }}"
+            data-student-name="{{ r.student_name }}"
+            data-parent-phone="{{ r.parent_phone or '' }}"
+            data-department="{{ r.department or '' }}"
+            data-marks='{{ r.marks|tojson|e }}'>
+            <i class="fab fa-whatsapp"></i> Send to WhatsApp
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+      {% if not rows %}
+      <tr><td colspan="5" class="text-center text-muted" style="padding:18px;">No students available for this test.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</div>
+
+<div class="modal-overlay" id="modal-send-preview">
+  <div class="modal" style="max-width:720px;">
+    <div class="modal-header">
+      <h3><i class="fab fa-whatsapp"></i> WhatsApp Preview</h3>
+      <button class="modal-close" onclick="closeModal('send-preview')">&times;</button>
+    </div>
+    <div class="wa-preview">
+      <div class="wa-chat-header">Message Preview</div>
+      <textarea id="previewText" class="form-control" rows="12" readonly></textarea>
+    </div>
+
+    <form method="POST" action="{{ url_for('api_send_single_report') }}" id="sendPreviewForm" class="mt-2" target="_self">
+      <input type="hidden" name="test_id" id="formTestId">
+      <input type="hidden" name="reg_no" id="formRegNo">
+      <input type="hidden" name="test_name" id="formTestName">
+      <input type="hidden" name="semester" id="formSemester">
+      <input type="hidden" name="batch_name" id="formBatchName">
+      <input type="hidden" name="section" id="formSection">
+      <input type="hidden" name="department" id="formDepartment">
+      <input type="hidden" name="message_template" id="formTemplate">
+      <input type="hidden" name="action" id="formAction" value="cancel">
+      <div class="btn-group mt-2">
+        <button type="submit" class="btn btn-outline" onclick="setSendAction('cancel')">Cancel (Keep Pending)</button>
+        <button type="button" class="btn btn-success" onclick="submitSendToWhatsApp()">Send to WhatsApp</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let activeSendButton = null;
+
+function getCommonVarsStorageKey() {
+  return `send_common_vars_{{ test_id }}`;
+}
+
+function saveCommonVarsToStorage() {
+  const payload = {
+    test_name: document.getElementById('varTestName').value || '',
+    semester: document.getElementById('varSemester').value || '',
+    batch_name: document.getElementById('varBatch').value || '',
+    section: document.getElementById('varSection').value || '',
+    template: document.getElementById('varTemplate').value || '',
+  };
+  localStorage.setItem(getCommonVarsStorageKey(), JSON.stringify(payload));
+}
+
+function loadCommonVarsFromStorage() {
+  const raw = localStorage.getItem(getCommonVarsStorageKey());
+  if (!raw) return;
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed.test_name !== undefined) document.getElementById('varTestName').value = parsed.test_name;
+    if (parsed.semester !== undefined) document.getElementById('varSemester').value = parsed.semester;
+    if (parsed.batch_name !== undefined) document.getElementById('varBatch').value = parsed.batch_name;
+    if (parsed.section !== undefined) document.getElementById('varSection').value = parsed.section;
+    if (parsed.template !== undefined) document.getElementById('varTemplate').value = parsed.template;
+  } catch (e) {
+    // Ignore malformed local storage payloads.
+  }
+}
+
+function bindCommonVarsAutoSave() {
+  ['varTestName', 'varSemester', 'varBatch', 'varSection', 'varTemplate'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener('input', saveCommonVarsToStorage);
+    el.addEventListener('change', saveCommonVarsToStorage);
+  });
+}
+
+function applyTemplate(template, vars) {
+  return template
+    .replaceAll('{test_name}', vars.test_name)
+    .replaceAll('{semester}', vars.semester)
+    .replaceAll('{department}', vars.department)
+    .replaceAll('{batch_name}', vars.batch_name)
+    .replaceAll('{section}', vars.section)
+    .replaceAll('{student_name}', vars.student_name)
+    .replaceAll('{reg_no}', vars.reg_no)
+    .replaceAll('{subjects_table}', vars.subjects_table)
+    .replaceAll('{counselor_name}', '{{ current_user_name or "Counselor" }}');
+}
+
+function normalizeMetricKey(key) {
+  return String(key || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isUnknownMetricField(rawKey, normalizedKey) {
+  const raw = String(rawKey || '').trim().toLowerCase();
+  if (!raw) return true;
+  if (raw.startsWith('unnamed')) return true;
+  if (/^subject[_\s-]*\d+$/.test(raw)) return true;
+  if (String(normalizedKey || '').startsWith('unnamed')) return true;
+  return false;
+}
+
+function isAbsentMark(value) {
+  const s = String(value || '').trim().toLowerCase();
+  return ['absent', 'ab', 'a', 'na', '-', 'not attended'].includes(s);
+}
+
+function buildSubjectsTable(marks) {
+  if (!marks || typeof marks !== 'object') return '';
+
+  const attendanceKeys = new Set(['attendance', 'att']);
+  const gpaKeys = new Set(['gpa', 'cgpa']);
+  const failedKeys = new Set(['noofsubjectsfailed', 'failedsubjects', 'failedcount', 'nooffailedsubjects']);
+  const notAttendedKeys = new Set(['examnotattended', 'notattended', 'absentcount', 'noofsubjectsabsent']);
+  const ignoredKeys = new Set([
+    'regno', 'registernumber', 'name', 'studentname', 'department', 'section', 'batch', 'semester',
+    'test', 'total', 'overall', 'percentage', 'grade', 'result', 'status', 'parentphone', 'phone',
+    'parentemail', 'email', 'sno', 'slno', 'serialno', 'serialnumber', 'rollno',
+    'absentees', 'absentee', 'absentstudents'
+  ]);
+
+  let attendance = '';
+  let gpa = '';
+  let failedCount = '';
+  let examNotAttended = '';
+  const subjects = [];
+
+  Object.entries(marks).forEach(([rawKey, rawVal]) => {
+    const key = normalizeMetricKey(rawKey);
+    const value = String(rawVal ?? '').trim();
+    if (isUnknownMetricField(rawKey, key)) return;
+    if (!key || ignoredKeys.has(key)) return;
+
+    if (attendanceKeys.has(key)) { attendance = value; return; }
+    if (gpaKeys.has(key)) { gpa = value; return; }
+    if (failedKeys.has(key)) { failedCount = value; return; }
+    if (notAttendedKeys.has(key)) { examNotAttended = value; return; }
+    subjects.push([String(rawKey).trim(), value]);
+  });
+
+  const lines = [];
+  if (attendance) {
+    lines.push(`Attendance :\t${attendance}`);
+    lines.push('');
+  }
+  subjects.forEach(([k, v]) => lines.push(`${k} :\t${v}`));
+  if (gpa) lines.push(`GPA :\t${gpa}`);
+  return lines.join('\n');
+}
+
+function openSendPreview(btn) {
+  activeSendButton = btn;
+  const testId = btn.dataset.testId;
+  const regNo = btn.dataset.regNo;
+  const studentName = btn.dataset.studentName;
+  const department = btn.dataset.department;
+  let marks = {};
+  try {
+    marks = JSON.parse(btn.dataset.marks || '{}');
+  } catch (e) {
+    marks = {};
+  }
+
+  const testName = document.getElementById('varTestName').value || '';
+  const semester = document.getElementById('varSemester').value || '';
+  const batch = document.getElementById('varBatch').value || '';
+  const section = document.getElementById('varSection').value || '';
+  const template = document.getElementById('varTemplate').value || '';
+
+  const marksLines = buildSubjectsTable(marks || {});
+  const vars = {
+    test_name: testName,
+    semester: semester,
+    department: department || '{{ test_meta.department or "" }}',
+    batch_name: batch,
+    section: section,
+    student_name: studentName,
+    reg_no: regNo,
+    subjects_table: marksLines,
+  };
+  const msg = applyTemplate(template, vars);
+
+  document.getElementById('previewText').value = msg;
+  document.getElementById('formTestId').value = testId;
+  document.getElementById('formRegNo').value = regNo;
+  document.getElementById('formTestName').value = testName;
+  document.getElementById('formSemester').value = semester;
+  document.getElementById('formBatchName').value = batch;
+  document.getElementById('formSection').value = section;
+  document.getElementById('formDepartment').value = vars.department;
+  document.getElementById('formTemplate').value = template;
+
+  openModal('send-preview');
+}
+
+function setSendAction(action) {
+  const form = document.getElementById('sendPreviewForm');
+  const actionEl = document.getElementById('formAction');
+  if (!form || !actionEl) return;
+  actionEl.value = action;
+  form.target = '_self';
+}
+
+async function submitSendToWhatsApp() {
+  const form = document.getElementById('sendPreviewForm');
+  const actionEl = document.getElementById('formAction');
+  if (!form || !actionEl) return;
+
+  actionEl.value = 'send';
+  const formData = new FormData(form);
+  formData.set('ajax', '1');
+  const submitUrl = form.getAttribute('action');
+
+  try {
+    const response = await fetch(submitUrl, {
+      method: 'POST',
+      body: formData,
+      credentials: 'same-origin'
+    });
+
+    if (response.redirected && response.url && response.url.includes('/login')) {
+      window.location.href = response.url;
+      return;
+    }
+
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      const txt = await response.text();
+      alert('Unexpected server response while opening WhatsApp.');
+      console.error('Unexpected send-single response:', txt);
+      return;
+    }
+
+    const result = await response.json();
+    if (!response.ok || !result.success) {
+      alert((result && result.error) ? result.error : 'Unable to open WhatsApp. Please try again.');
+      return;
+    }
+
+    if (result.wa_link) {
+      window.open(result.wa_link, '_blank', 'noopener,noreferrer');
+    }
+
+    if (activeSendButton) {
+      const row = activeSendButton.closest('tr');
+      if (row && row.children && row.children.length >= 4) {
+        row.children[3].innerHTML = '<span class="badge badge-success">Generated</span>';
+      }
+    }
+
+    closeModal('send-preview');
+    saveCommonVarsToStorage();
+  } catch (error) {
+    alert('Unable to open WhatsApp. Please check your connection and try again.');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  loadCommonVarsFromStorage();
+  bindCommonVarsAutoSave();
+});
+</script>
+{% endblock %}

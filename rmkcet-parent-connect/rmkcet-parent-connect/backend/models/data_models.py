@@ -1,5 +1,6 @@
 # models/data_models.py
 """Pydantic models for data validation."""
+from decimal import Decimal, InvalidOperation
 from typing import Optional, List, Dict
 from datetime import datetime
 
@@ -27,11 +28,27 @@ class StudentRecord:
     @staticmethod
     def _clean_phone(val):
         """Extract 10-digit phone number."""
-        if not val:
+        if val is None:
             return ""
-        digits = "".join(c for c in str(val) if c.isdigit())
-        if digits.endswith(".0"):
-            digits = digits[:-2]
+
+        raw = val
+        if isinstance(val, float):
+            if val.is_integer():
+                raw = str(int(val))
+            else:
+                raw = format(val, "f")
+        else:
+            s = str(val).strip()
+            # Convert scientific notation safely when present.
+            if "e" in s.lower():
+                try:
+                    raw = format(Decimal(s), "f")
+                except (InvalidOperation, ValueError):
+                    raw = s
+            else:
+                raw = s
+
+        digits = "".join(c for c in str(raw) if c.isdigit())
         # Take last 10 digits
         return digits[-10:] if len(digits) >= 10 else digits
 

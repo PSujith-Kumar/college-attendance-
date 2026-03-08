@@ -25,6 +25,7 @@
   --info:       #3b82f6;
 
   --text:       #e2e8f0;
+  --text-strong:#f8fafc;
   --text-dim:   #94a3b8;
   --text-muted: #64748b;
 
@@ -46,6 +47,45 @@ body {
   color: var(--text);
   min-height: 100vh;
   overflow-x: hidden;
+}
+
+body.light-theme {
+  --bg-primary: #f5f7fb;
+  --bg-secondary: #ffffff;
+  --bg-card: rgba(255, 255, 255, 0.95);
+  --bg-card-hover: rgba(255, 255, 255, 1);
+  --bg-input: #ffffff;
+  --border: rgba(148, 163, 184, 0.35);
+  --border-light: rgba(148, 163, 184, 0.22);
+  --text: #0f172a;
+  --text-strong: #020617;
+  --text-dim: #334155;
+  --text-muted: #64748b;
+}
+
+body.light-theme .sidebar {
+  background: linear-gradient(180deg, #ffffff 0%, #eef3fb 100%);
+}
+
+body.light-theme .top-header {
+  background: rgba(255, 255, 255, 0.85);
+}
+
+body.light-theme .logo-title,
+body.light-theme .user-name,
+body.light-theme .page-title,
+body.light-theme .card-title,
+body.light-theme .metric-value {
+  color: var(--text);
+}
+
+body.light-theme .nav-link:hover,
+body.light-theme .btn-outline:hover {
+  color: var(--text);
+}
+
+body.light-theme .logout-btn:hover {
+  color: #b91c1c;
 }
 
 a { color: var(--primary); text-decoration: none; }
@@ -77,14 +117,25 @@ a:hover { color: var(--accent); }
 .logo-area { display: flex; align-items: center; gap: 10px; }
 .logo-icon { font-size: 28px; }
 .logo-text { display: flex; flex-direction: column; line-height: 1.2; }
-.logo-title { font-weight: 800; font-size: 1.05rem; color: #fff; }
+.logo-title { font-weight: 800; font-size: 1.05rem; color: var(--text-strong); }
 .logo-subtitle { font-size: .7rem; color: var(--text-dim); }
-.sidebar-toggle {
-  background: none; border: none; color: var(--text-dim);
-  font-size: 1.1rem; cursor: pointer; padding: 6px;
+.logo-settings {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
   border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  transition: all var(--transition);
 }
-.sidebar-toggle:hover { color: #fff; background: rgba(255,255,255,.06); }
+.logo-settings:hover {
+  color: #fff;
+  border-color: var(--primary);
+  background: rgba(102, 126, 234, 0.14);
+}
 
 .sidebar-nav { flex: 1; padding: 12px 10px; overflow-y: auto; }
 .nav-link {
@@ -99,25 +150,6 @@ a:hover { color: var(--accent); }
 .nav-link i { width: 20px; text-align: center; font-size: .95rem; }
 .nav-link span { transition: opacity var(--transition), width var(--transition); white-space: nowrap; }
 
-/* Sidebar Collapsed State */
-.sidebar.collapsed {
-  width: var(--sidebar-collapsed);
-}
-.sidebar.collapsed .logo-text,
-.sidebar.collapsed .user-details,
-.sidebar.collapsed .nav-link span {
-  opacity: 0;
-  width: 0;
-  overflow: hidden;
-}
-.sidebar.collapsed .logo-area { justify-content: center; }
-.sidebar.collapsed .sidebar-header { justify-content: center; padding: 18px 10px; }
-.sidebar.collapsed .sidebar-toggle { display: none; }
-.sidebar.collapsed .nav-link { justify-content: center; padding: 11px; }
-.sidebar.collapsed .user-info { justify-content: center; }
-.sidebar.collapsed .logout-btn span { display: none; }
-.sidebar.collapsed .logout-btn { padding: 9px 12px; }
-
 .sidebar-footer {
   padding: 14px 16px; border-top: 1px solid var(--border);
 }
@@ -128,7 +160,7 @@ a:hover { color: var(--accent); }
   display: grid; place-items: center; font-weight: 700; font-size: .95rem; color: #fff;
 }
 .user-details { display: flex; flex-direction: column; }
-.user-name { font-size: .85rem; font-weight: 600; color: #fff; }
+.user-name { font-size: .85rem; font-weight: 600; color: var(--text-strong); }
 .user-role { font-size: .7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; }
 .logout-btn {
   display: block; text-align: center; padding: 9px;
@@ -166,7 +198,7 @@ a:hover { color: var(--accent); }
   position: sticky; top: 0; z-index: 100;
 }
 .mobile-toggle { display: none; background: none; border: none; color: var(--text-dim); font-size: 1.2rem; cursor: pointer; }
-.page-title { font-size: 1.25rem; font-weight: 700; color: #fff; }
+.page-title { font-size: 1.25rem; font-weight: 700; color: var(--text-strong); }
 .header-actions { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 .header-badge {
   font-size: .78rem; padding: 5px 12px;
@@ -215,7 +247,7 @@ a:hover { color: var(--accent); }
 .card:nth-child(5) { animation-delay: .2s; }
 .card:hover { border-color: rgba(102,126,234,.3); transform: translateY(-2px); }
 .card-title {
-  font-size: 1rem; font-weight: 700; color: #fff;
+  font-size: 1rem; font-weight: 700; color: var(--text-strong);
   margin-bottom: 12px; display: flex; align-items: center; gap: 8px;
 }
 
@@ -266,7 +298,7 @@ a:hover { color: var(--accent); }
   background: linear-gradient(90deg, var(--primary), var(--secondary));
 }
 .metric-label { font-size: .78rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 6px; }
-.metric-value { font-size: 1.8rem; font-weight: 800; color: #fff; }
+.metric-value { font-size: 1.8rem; font-weight: 800; color: var(--text-strong); }
 .metric-icon { position: absolute; right: 18px; top: 50%; transform: translateY(-50%); font-size: 2.2rem; opacity: .12; color: var(--primary); }
 
 /* ============================================================
@@ -420,7 +452,7 @@ tbody tr:hover { background: rgba(102,126,234,.04); }
 }
 .login-logo { text-align: center; margin-bottom: 28px; }
 .login-logo .icon { font-size: 3rem; margin-bottom: 10px; display: block; }
-.login-logo h2 { font-size: 1.4rem; font-weight: 800; color: #fff; }
+.login-logo h2 { font-size: 1.4rem; font-weight: 800; color: var(--text-strong); }
 .login-logo p { font-size: .82rem; color: var(--text-dim); margin-top: 4px; }
 .login-box .btn-primary { width: 100%; justify-content: center; padding: 12px; font-size: .95rem; }
 
@@ -441,7 +473,7 @@ tbody tr:hover { background: rgba(102,126,234,.04); }
   display: grid; place-items: center; font-weight: 700; font-size: 1.1rem; color: #fff;
   flex-shrink: 0;
 }
-.user-card-info h3 { font-size: .95rem; font-weight: 700; color: #fff; }
+.user-card-info h3 { font-size: .95rem; font-weight: 700; color: var(--text-strong); }
 .user-card-info p { font-size: .78rem; color: var(--text-dim); }
 .user-card-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .user-card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
@@ -460,7 +492,7 @@ tbody tr:hover { background: rgba(102,126,234,.04); }
   background: rgba(255,255,255,.02); border-radius: var(--radius-sm);
   border: 1px solid var(--border-light);
 }
-.activity-stat .num { font-size: 1.3rem; font-weight: 800; color: #fff; }
+.activity-stat .num { font-size: 1.3rem; font-weight: 800; color: var(--text-strong); }
 .activity-stat .lbl { font-size: .7rem; color: var(--text-dim); text-transform: uppercase; }
 
 .progress-bar-outer {
@@ -491,9 +523,9 @@ tbody tr:hover { background: rgba(102,126,234,.04); }
 }
 @keyframes modalIn { from { opacity: 0; transform: scale(.95); } }
 .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
-.modal-header h3 { font-size: 1.1rem; font-weight: 700; color: #fff; }
+.modal-header h3 { font-size: 1.1rem; font-weight: 700; color: var(--text-strong); }
 .modal-close { background: none; border: none; color: var(--text-dim); font-size: 1.2rem; cursor: pointer; }
-.modal-close:hover { color: #fff; }
+.modal-close:hover { color: var(--text-strong); }
 
 /* ============================================================
    STUDENT TABLE (Counselor)
@@ -508,7 +540,7 @@ tbody tr:hover { background: rgba(102,126,234,.04); }
   background: var(--bg-card); border: 1px solid var(--border);
   border-radius: var(--radius); padding: 18px; margin-bottom: 12px;
 }
-.report-card h4 { font-size: .95rem; font-weight: 700; color: #fff; margin-bottom: 6px; }
+.report-card h4 { font-size: .95rem; font-weight: 700; color: var(--text-strong); margin-bottom: 6px; }
 .report-marks { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
 .mark-chip {
   padding: 4px 12px; background: rgba(102,126,234,.1);
@@ -697,7 +729,7 @@ tbody tr:hover { background: rgba(102,126,234,.04); }
 .empty-state p { font-size: .85rem; }
 
 .section-title {
-  font-size: 1.05rem; font-weight: 700; color: #fff;
+  font-size: 1.05rem; font-weight: 700; color: var(--text-strong);
   margin-bottom: 16px; display: flex; align-items: center; gap: 8px;
 }
 

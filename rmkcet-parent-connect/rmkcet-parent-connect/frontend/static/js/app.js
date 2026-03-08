@@ -41,9 +41,9 @@ document.addEventListener('DOMContentLoaded', () => {
     history.replaceState(null, '', window.location.pathname + window.location.search);
   }
 
-  // Auto-dismiss flash messages
+  // Auto-dismiss only success/info flashes; keep warning/error visible until user closes.
   setTimeout(() => {
-    document.querySelectorAll('.flash').forEach(el => {
+    document.querySelectorAll('.flash-success, .flash-info').forEach(el => {
       el.style.transition = 'opacity .4s, transform .4s';
       el.style.opacity = '0';
       el.style.transform = 'translateY(-8px)';
@@ -51,21 +51,34 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }, 5000);
 
-  // Sidebar toggle
+  // Mobile sidebar toggle
   const sidebar = document.getElementById('sidebar');
-  const sToggle = document.getElementById('sidebarToggle');
   const mToggle = document.getElementById('mobileToggle');
-
-  if (sToggle) {
-    sToggle.addEventListener('click', () => {
-      sidebar.classList.toggle('collapsed');
-      document.getElementById('mainContent').style.marginLeft =
-        sidebar.classList.contains('collapsed') ? '68px' : '';
-    });
-  }
   if (mToggle) {
     mToggle.addEventListener('click', () => {
       sidebar.classList.toggle('open');
+    });
+  }
+
+  const themeToggle = document.getElementById('themeToggle');
+  const themeIcon = document.getElementById('themeToggleIcon');
+  const savedTheme = localStorage.getItem('theme') || 'light';
+
+  function applyTheme(theme) {
+    document.body.classList.toggle('light-theme', theme === 'light');
+    if (themeIcon) {
+      themeIcon.classList.remove('fa-sun', 'fa-moon');
+      themeIcon.classList.add(theme === 'light' ? 'fa-moon' : 'fa-sun');
+    }
+  }
+
+  applyTheme(savedTheme);
+
+  if (themeToggle) {
+    themeToggle.addEventListener('click', () => {
+      const nextTheme = document.body.classList.contains('light-theme') ? 'dark' : 'light';
+      localStorage.setItem('theme', nextTheme);
+      applyTheme(nextTheme);
     });
   }
 });
