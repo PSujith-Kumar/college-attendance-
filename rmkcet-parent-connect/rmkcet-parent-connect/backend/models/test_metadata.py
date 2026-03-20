@@ -7,10 +7,12 @@ from typing import Dict, Optional
 # Roman numeral mapping
 ROMAN_MAP = {"I": 1, "II": 2, "III": 3, "IV": 4, "V": 5, "VI": 6, "VII": 7, "VIII": 8}
 
-# Known test-type keywords
+# Known test-type keywords  (ordered longest-first so "iit" doesn't shadow longer matches)
 TEST_KEYWORDS = [
-    "unit test", "iat", "internal assessment", "model exam",
-    "semester exam", "mid term", "midterm", "cat", "cycle test",
+    "internal assessment test", "internal assessment",
+    "unit test", "cycle test", "model exam",
+    "semester exam", "mid term", "midterm",
+    "cat", "iit", "iat",
 ]
 
 

@@ -23,7 +23,7 @@ from fpdf import FPDF
 import database as db
 from config import (
     SECRET_KEY, APP_NAME, APP_VERSION, DATA_DIR,
-    MESSAGE_TEMPLATE, COUNTRY_CODE
+    MESSAGE_TEMPLATE, COUNTRY_CODE, DEPT_REG_PATTERNS
 )
 
 # ---------------------------------------------------------------------------
@@ -90,11 +90,81 @@ def login_required(f):
 def admin_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
-        if session.get("role") != "admin":
+        if session.get("role") not in {"admin", "chief_admin"}:
             flash("Admin access required.", "error")
             return redirect(url_for("index"))
+
+        user = db.get_user(session.get("user_email", "")) or {}
+        department = (user.get("department") or "").strip()
+        if session.get("role") == "chief_admin" and department and not db.is_department_active(department):
+            flash("Department is currently blocked by system administration. Access is read-only limited.", "warning")
         return f(*args, **kwargs)
     return decorated
+
+
+def _is_system_admin(role):
+    return str(role or "").strip().lower() == "admin"
+
+
+def _is_chief_admin(role):
+    return str(role or "").strip().lower() == "chief_admin"
+
+
+def _is_admin_portal_user(role):
+    return _is_system_admin(role) or _is_chief_admin(role)
+
+
+def _get_actor_scope_pairs(actor_email, actor_role):
+    if _is_system_admin(actor_role):
+        return None
+    scopes = db.get_chief_admin_scopes(actor_email)
+    return {(str(s.get("department") or "").upper(), int(s.get("year_level") or 1)) for s in scopes}
+
+
+def _can_chief_admin_touch_user(actor_email, target_user):
+    if not target_user:
+        return False
+    if target_user.get("role") != "counselor":
+        return False
+    scopes = _get_actor_scope_pairs(actor_email, "chief_admin") or set()
+    key = (str(target_user.get("department") or "").upper(), int(target_user.get("year_level") or 1))
+    return key in scopes
+
+
+def _get_allowed_counselor_emails_for_actor(actor_email, actor_role):
+    if _is_system_admin(actor_role):
+        return None
+    users = db.get_scoped_users_for_admin(actor_email, actor_role)
+    return [u.get("email") for u in users if u.get("role") == "counselor"]
+
+
+def _can_manage_department_year(actor_email, actor_role, department, year_level):
+    if _is_system_admin(actor_role):
+        return True
+    if not _is_chief_admin(actor_role):
+        return False
+    scopes = _get_actor_scope_pairs(actor_email, actor_role) or set()
+    return (str(department or "").strip().upper(), int(year_level or 1)) in scopes
+
+
+def _is_counselor_department_blocked(user_email, role):
+    if str(role or "") != "counselor":
+        return False
+    user = db.get_user(user_email) or {}
+    return not db.is_department_active(user.get("department"))
+
+
+def _filter_activity_for_actor(activity_rows, actor_email, actor_role):
+    scopes = _get_actor_scope_pairs(actor_email, actor_role)
+    if scopes is None:
+        return activity_rows
+    filtered = []
+    for row in activity_rows:
+        u = db.get_user(row.get("email")) or {}
+        key = (str(row.get("department") or "").upper(), int(u.get("year_level") or 1))
+        if key in scopes:
+            filtered.append(row)
+    return filtered
 
 
 def _get_admin_tab(default_tab="users"):
@@ -130,7 +200,10 @@ def _redirect_admin_back(default_tab="users", **extra_query):
 def _get_message_filters_from_request():
     msg_day = (request.values.get("msg_day") or "").strip()
     msg_q = (request.values.get("msg_q") or "").strip()
-    return msg_day, msg_q
+    msg_year = (request.values.get("msg_year") or "").strip()
+    msg_month = (request.values.get("msg_month") or "").strip()
+    msg_day_num = (request.values.get("msg_day_num") or "").strip()
+    return msg_day, msg_q, msg_year, msg_month, msg_day_num
 
 
 def _message_export_filename(ext):
@@ -247,7 +320,7 @@ def _build_parent_message(test_name, reg_no, student_name, marks):
 @app.route("/")
 def index():
     if "user_email" in session:
-        return redirect(url_for("admin" if session.get("role") == "admin" else "counselor_page"))
+        return redirect(url_for("admin" if _is_admin_portal_user(session.get("role")) else "counselor_page"))
     return redirect(url_for("login"))
 
 
@@ -296,7 +369,7 @@ def login():
         session["session_id"] = sid
         session["department"] = user.get("department", "")
 
-        return redirect(url_for("admin" if user["role"] == "admin" else "counselor_page"))
+        return redirect(url_for("admin" if _is_admin_portal_user(user["role"]) else "counselor_page"))
 
     return render_template("login.html")
 
@@ -316,47 +389,90 @@ def logout():
 @login_required
 @admin_required
 def admin():
-    users = db.get_all_users()
-    departments = db.get_departments(active_only=False)
-    active_sessions = db.get_active_sessions()
-    activity = db.get_counselor_activity_summary()
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    current_tab = (request.args.get("tab") or "users").strip()
+
+    if _is_chief_admin(actor_role) and current_tab in {"monitoring", "config"}:
+        flash("Only system admin can access this section.", "warning")
+        return redirect(url_for("admin", tab="reports"))
+
+    allowed_scopes = _get_actor_scope_pairs(actor_email, actor_role)
+    users = db.get_scoped_users_for_admin(actor_email, actor_role)
+    departments = db.get_departments_for_admin(actor_email, actor_role, active_only=False)
+    active_sessions = db.get_active_sessions() if _is_system_admin(actor_role) else []
+    full_activity = db.get_counselor_activity_summary()
+    activity = _filter_activity_for_actor(full_activity, actor_email, actor_role)
     format_settings = db.get_format_settings()
+
     msg_day = (request.args.get("msg_day") or "").strip()
     msg_q = (request.args.get("msg_q") or "").strip()
-    messages = db.get_message_history_filtered(day=msg_day or None, counselor_query=msg_q or None, limit=1500)
+    msg_year = (request.args.get("msg_year") or "").strip()
+    msg_month = (request.args.get("msg_month") or "").strip()
+    msg_day_num = (request.args.get("msg_day_num") or "").strip()
+    allowed_counselors = _get_allowed_counselor_emails_for_actor(actor_email, actor_role)
+
+    messages = db.get_message_history_filtered(
+        day=msg_day or None,
+        counselor_query=msg_q or None,
+        limit=1500,
+        filter_year=msg_year or None,
+        filter_month=msg_month or None,
+        filter_day=msg_day_num or None,
+        allowed_counselors=allowed_counselors,
+    )
     message_days = db.get_message_days(counselor_query=msg_q or None)
     grouped_map = {}
     for m in messages:
         day_key = str((m.get("sent_at") or "")[:10] or "Unknown")
         grouped_map.setdefault(day_key, []).append(m)
     message_groups = [{"day": day, "messages": rows, "total": len(rows)} for day, rows in grouped_map.items()]
-    msg_stats = db.get_message_stats()
+    msg_stats = db.get_message_stats(actor_email) if _is_chief_admin(actor_role) else db.get_message_stats()
+    counselor_suggestions = db.get_message_counselor_suggestions(
+        query=msg_q,
+        allowed_counselors=allowed_counselors,
+    )
     
     # App configuration
     app_config = db.get_app_config()
     
     # Session monitoring statistics
-    session_stats = db.get_session_statistics()
-    session_history = db.get_session_history(limit=100)
+    session_stats = db.get_session_statistics() if _is_system_admin(actor_role) else {
+        "active_sessions": 0, "today_sessions": 0, "avg_duration_minutes": 0, "forced_logouts": 0,
+        "peak_concurrent": 0, "desktop_sessions": 0, "mobile_sessions": 0, "logout_reasons": {}
+    }
+    session_history = db.get_session_history(limit=100) if _is_system_admin(actor_role) else []
 
-    # Test results filters
-    filter_batch = request.args.get("filter_batch")
-    filter_semester = request.args.get("filter_semester")
-    filter_dept = request.args.get("filter_dept")
-    filter_counselor = request.args.get("filter_counselor")
-    
-    all_tests = db.get_all_unique_tests(
-        filter_batch=filter_batch,
-        filter_semester=filter_semester,
-        filter_dept=filter_dept,
-        filter_counselor=filter_counselor
+    selected_department = (request.args.get("dept") or "").strip().upper()
+    selected_year_level = request.args.get("year_level", type=int) or 1
+    department_tests = db.get_all_unique_tests(
+        filter_dept=selected_department or None,
+        filter_year_level=selected_year_level,
+        allowed_scopes=allowed_scopes,
     )
-    
-    # Get unique batches for filter dropdown
-    batches = sorted(set(t.get("batch_name") for t in all_tests if t.get("batch_name")))
-    
-    # Keep parity with previous template context
-    unique_tests = all_tests
+
+    report_department = (request.args.get("report_dept") or selected_department or "").strip().upper()
+    report_year_level = request.args.get("report_year", type=int) or selected_year_level
+    report_tests = db.get_all_unique_tests(
+        filter_dept=report_department or None,
+        filter_year_level=report_year_level,
+        allowed_scopes=allowed_scopes,
+    )
+    recent_report_tests = db.get_all_unique_tests(allowed_scopes=allowed_scopes)[:6]
+    chief_scopes = db.get_chief_admin_scopes(actor_email) if _is_chief_admin(actor_role) else []
+    chief_scope_keys = [
+        f"{str(s.get('department') or '').upper()}::{int(s.get('year_level') or 1)}"
+        for s in chief_scopes
+    ]
+    chief_scopes_by_email = {}
+    for u in users:
+        if u.get("role") != "chief_admin":
+            continue
+        scopes_for_user = db.get_chief_admin_scopes(u.get("email"))
+        chief_scopes_by_email[u.get("email")] = [
+            f"{str(s.get('department') or '').upper()}::{int(s.get('year_level') or 1)}"
+            for s in scopes_for_user
+        ]
 
     counselors = [u for u in users if u["role"] == "counselor"]
     students_map = {c["email"]: db.get_students(c["email"]) for c in counselors}
@@ -372,13 +488,26 @@ def admin():
         message_days=message_days,
         selected_message_day=msg_day,
         message_query=msg_q,
+        selected_message_year=msg_year,
+        selected_message_month=msg_month,
+        selected_message_day_num=msg_day_num,
+        counselor_suggestions=counselor_suggestions,
         msg_stats=msg_stats,
         counselor_count=len(counselors),
         active_counselor_count=sum(1 for c in counselors if c["is_active"]),
         session_count=len(active_sessions),
-        all_tests=all_tests,
-        unique_tests=unique_tests,
-        batches=batches,
+        department_tests=department_tests,
+        selected_department=selected_department,
+        selected_year_level=selected_year_level,
+        report_department=report_department,
+        report_year_level=report_year_level,
+        report_tests=report_tests,
+        recent_report_tests=recent_report_tests,
+        chief_scopes=chief_scopes,
+        chief_scope_keys=chief_scope_keys,
+        chief_scopes_by_email=chief_scopes_by_email,
+        is_system_admin=_is_system_admin(actor_role),
+        is_chief_admin=_is_chief_admin(actor_role),
         app_config=app_config,
         session_stats=session_stats,
         session_history=session_history,
@@ -390,43 +519,52 @@ def admin():
 @login_required
 @admin_required
 def api_delete_message(message_id):
-    msg_day, msg_q = _get_message_filters_from_request()
+    msg_day, msg_q, msg_year, msg_month, msg_day_num = _get_message_filters_from_request()
     deleted = db.delete_message_by_id(message_id)
     if deleted:
         flash("Message entry deleted.", "success")
     else:
         flash("Message entry not found.", "warning")
-    return _redirect_admin_back("messages", msg_day=msg_day, msg_q=msg_q)
+    return _redirect_admin_back("messages", msg_day=msg_day, msg_q=msg_q, msg_year=msg_year, msg_month=msg_month, msg_day_num=msg_day_num)
 
 
 @app.route("/api/messages/delete-bulk", methods=["POST"])
 @login_required
 @admin_required
 def api_delete_messages_bulk():
-    msg_day, msg_q = _get_message_filters_from_request()
+    msg_day, msg_q, msg_year, msg_month, msg_day_num = _get_message_filters_from_request()
     ids = request.form.getlist("message_ids")
     if not ids:
         flash("Select at least one message to delete.", "warning")
-        return _redirect_admin_back("messages", msg_day=msg_day, msg_q=msg_q)
+        return _redirect_admin_back("messages", msg_day=msg_day, msg_q=msg_q, msg_year=msg_year, msg_month=msg_month, msg_day_num=msg_day_num)
 
     deleted = db.delete_messages_by_ids(ids)
     if deleted:
         flash(f"Deleted {deleted} message entr{'y' if deleted == 1 else 'ies'}.", "success")
     else:
         flash("No messages were deleted.", "warning")
-    return _redirect_admin_back("messages", msg_day=msg_day, msg_q=msg_q)
+    return _redirect_admin_back("messages", msg_day=msg_day, msg_q=msg_q, msg_year=msg_year, msg_month=msg_month, msg_day_num=msg_day_num)
 
 
 @app.route("/api/messages/export/csv")
 @login_required
 @admin_required
 def api_export_messages_csv():
-    msg_day, msg_q = _get_message_filters_from_request()
-    data = db.get_message_history_filtered(day=msg_day or None, counselor_query=msg_q or None, limit=None)
+    msg_day, msg_q, msg_year, msg_month, msg_day_num = _get_message_filters_from_request()
+    allowed_counselors = _get_allowed_counselor_emails_for_actor(session.get("user_email"), session.get("role"))
+    data = db.get_message_history_filtered(
+        day=msg_day or None,
+        counselor_query=msg_q or None,
+        limit=None,
+        filter_year=msg_year or None,
+        filter_month=msg_month or None,
+        filter_day=msg_day_num or None,
+        allowed_counselors=allowed_counselors,
+    )
 
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Date", "Time", "Counselor", "Counselor Email", "Student", "Reg No", "Format", "Status", "Test ID"])
+    w.writerow(["Date", "Time", "Counselor", "Counselor Email", "Student", "Reg No", "Format", "Status"])
     for m in data:
         sent_at = str(m.get("sent_at") or "")
         date_part = sent_at[:10]
@@ -440,7 +578,6 @@ def api_export_messages_csv():
             m.get("reg_no") or "",
             m.get("format") or "",
             m.get("status") or "",
-            m.get("test_id") or "",
         ])
 
     buf.seek(0)
@@ -458,14 +595,23 @@ def api_export_messages_excel():
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
 
-    msg_day, msg_q = _get_message_filters_from_request()
-    data = db.get_message_history_filtered(day=msg_day or None, counselor_query=msg_q or None, limit=None)
+    msg_day, msg_q, msg_year, msg_month, msg_day_num = _get_message_filters_from_request()
+    allowed_counselors = _get_allowed_counselor_emails_for_actor(session.get("user_email"), session.get("role"))
+    data = db.get_message_history_filtered(
+        day=msg_day or None,
+        counselor_query=msg_q or None,
+        limit=None,
+        filter_year=msg_year or None,
+        filter_month=msg_month or None,
+        filter_day=msg_day_num or None,
+        allowed_counselors=allowed_counselors,
+    )
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Message Activity"
 
-    headers = ["Date", "Time", "Counselor", "Counselor Email", "Student", "Reg No", "Format", "Status", "Test ID"]
+    headers = ["Date", "Time", "Counselor", "Counselor Email", "Student", "Reg No", "Format", "Status"]
     header_fill = PatternFill(start_color="667eea", end_color="667eea", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
     for ci, h in enumerate(headers, 1):
@@ -484,7 +630,6 @@ def api_export_messages_excel():
         ws.cell(row=ri, column=6, value=m.get("reg_no") or "")
         ws.cell(row=ri, column=7, value=m.get("format") or "")
         ws.cell(row=ri, column=8, value=m.get("status") or "")
-        ws.cell(row=ri, column=9, value=m.get("test_id") or "")
 
     for col in ws.columns:
         max_len = max(len(str(c.value or "")) for c in col) + 2
@@ -505,8 +650,17 @@ def api_export_messages_excel():
 @login_required
 @admin_required
 def api_export_messages_pdf():
-    msg_day, msg_q = _get_message_filters_from_request()
-    data = db.get_message_history_filtered(day=msg_day or None, counselor_query=msg_q or None, limit=None)
+    msg_day, msg_q, msg_year, msg_month, msg_day_num = _get_message_filters_from_request()
+    allowed_counselors = _get_allowed_counselor_emails_for_actor(session.get("user_email"), session.get("role"))
+    data = db.get_message_history_filtered(
+        day=msg_day or None,
+        counselor_query=msg_q or None,
+        limit=None,
+        filter_year=msg_year or None,
+        filter_month=msg_month or None,
+        filter_day=msg_day_num or None,
+        allowed_counselors=allowed_counselors,
+    )
 
     pdf = FPDF("L")
     pdf.add_page()
@@ -517,8 +671,8 @@ def api_export_messages_pdf():
     pdf.cell(0, 8, subtitle[:150], 0, 1, "C")
     pdf.ln(2)
 
-    widths = [24, 18, 44, 52, 36, 24, 20, 20, 18]
-    heads = ["Date", "Time", "Counselor", "Email", "Student", "Reg No", "Format", "Status", "Test ID"]
+    widths = [24, 18, 44, 52, 36, 24, 20, 20]
+    heads = ["Date", "Time", "Counselor", "Email", "Student", "Reg No", "Format", "Status"]
 
     pdf.set_font("Arial", "B", 8)
     pdf.set_fill_color(102, 126, 234)
@@ -538,8 +692,7 @@ def api_export_messages_pdf():
         pdf.cell(widths[4], 7, str(m.get("student_name") or "")[:20], 1)
         pdf.cell(widths[5], 7, str(m.get("reg_no") or "")[:14], 1)
         pdf.cell(widths[6], 7, str(m.get("format") or "")[:10], 1, 0, "C")
-        pdf.cell(widths[7], 7, str(m.get("status") or "")[:10], 1, 0, "C")
-        pdf.cell(widths[8], 7, str(m.get("test_id") or "")[:8], 1, 1, "C")
+        pdf.cell(widths[7], 7, str(m.get("status") or "")[:10], 1, 1, "C")
 
     buf = io.BytesIO()
     raw = pdf.output(dest="S")
@@ -564,8 +717,10 @@ def counselor_page():
         session.clear()
         return redirect(url_for("login"))
 
+    is_blocked_department = not db.is_department_active(user.get("department"))
     students = db.get_students(email)
     tests = db.get_visible_tests_for_counselor(email)
+    recent_tests = tests[:2]
     msg_stats = db.get_message_stats(email)
     msg_history = db.get_message_history(email, limit=50)
     
@@ -585,9 +740,11 @@ def counselor_page():
     return render_template(
         "counselor.html",
         user=user,
+        is_blocked_department=is_blocked_department,
         students=students,
         assigned_students_count=len(students),
         tests=tests,
+        recent_tests=recent_tests,
         msg_stats=msg_stats,
         msg_history=msg_history,
         submissions=submissions,
@@ -596,7 +753,7 @@ def counselor_page():
         pending_students=pending_students,
         sent_count=(len(sent_reg_nos) if selected_test_id else 0),
         can_upload_students=bool(user.get("can_upload_students", 1)),
-        report_tab=(request.args.get("tab") or "reports"),
+        report_tab=(request.args.get("tab") or "recent-tests"),
     )
 
 
@@ -608,16 +765,34 @@ def counselor_page():
 @login_required
 @admin_required
 def api_create_user():
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
     email = request.form.get("email", "").strip()
     password = request.form.get("password", "")
     confirm_password = request.form.get("confirm_password", "")
     name = request.form.get("name", "").strip()
     role = request.form.get("role", "counselor")
-    role = role if role in {"admin", "counselor"} else "counselor"
+    role = role if role in {"admin", "chief_admin", "counselor"} else "counselor"
+    year_level = request.form.get("year_level", type=int) or 1
+    scope_values = request.form.getlist("chief_scopes")
+
+    if _is_chief_admin(actor_role) and role != "counselor":
+        flash("Chief admins can create counselor accounts only.", "error")
+        return _redirect_admin_back("users")
+
+    if role == "admin" and not _is_system_admin(actor_role):
+        flash("Only system admin can create system admin accounts.", "error")
+        return _redirect_admin_back("users")
 
     if role == "admin":
         # Admins get unrestricted defaults and do not need counselor-specific fields.
         department = ""
+        year_level = 1
+        max_students = 500
+        can_upload = True
+    elif role == "chief_admin":
+        department = (request.form.get("department") or "").strip().upper()
+        year_level = 1
         max_students = 500
         can_upload = True
     else:
@@ -647,7 +822,31 @@ def api_create_user():
         flash("Password must be at least 6 characters.", "error")
         return _redirect_admin_back("users")
 
-    ok, msg = db.create_user(email, password, name, role, department, max_students, can_upload)
+    if role == "counselor" and year_level not in (1, 2, 3, 4):
+        flash("Year must be between 1 and 4.", "error")
+        return _redirect_admin_back("users")
+
+    if _is_chief_admin(actor_role) and role == "counselor":
+        scopes = _get_actor_scope_pairs(actor_email, actor_role) or set()
+        if (str(department or "").upper(), int(year_level or 1)) not in scopes:
+            flash("You can only create counselors inside your assigned department/year scope.", "error")
+            return _redirect_admin_back("users")
+
+    ok, msg = db.create_user(
+        email, password, name, role, department, max_students, can_upload, year_level
+    )
+
+    if ok and role == "chief_admin":
+        parsed_scopes = []
+        for raw in scope_values:
+            dep, _, yr = str(raw or "").partition("::")
+            try:
+                yr_int = int(yr)
+            except (TypeError, ValueError):
+                continue
+            parsed_scopes.append((dep, yr_int))
+        if parsed_scopes:
+            db.set_chief_admin_scopes(email, parsed_scopes)
 
     # Optional student file during registration (counselors only)
     if ok and role == "counselor" and "student_file" in request.files:
@@ -673,20 +872,129 @@ def api_create_user():
 @login_required
 @admin_required
 def api_update_user(email):
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    target = db.get_user(email)
+    if not target:
+        flash("User not found.", "error")
+        return _redirect_admin_back("users")
+
+    if _is_chief_admin(actor_role):
+        if target.get("role") != "counselor":
+            flash("You can modify only counselor accounts.", "error")
+            return _redirect_admin_back("users")
+
+        actor_scopes = _get_actor_scope_pairs(actor_email, actor_role) or set()
+        target_key = (
+            str(target.get("department") or "").strip().upper(),
+            int(target.get("year_level") or 1),
+        )
+        if target_key not in actor_scopes:
+            flash("You can modify only counselors in your assigned scope.", "error")
+            return _redirect_admin_back("users")
+
+        requested_dep = (request.form.get("department") or target.get("department") or "").strip().upper()
+        requested_year = request.form.get("year_level", type=int) or int(target.get("year_level") or 1)
+        requested_key = (requested_dep, requested_year)
+        if requested_key not in actor_scopes:
+            flash("Update rejected: target department/year is outside your authorized assignments.", "error")
+            return _redirect_admin_back("users")
+
     updates = {}
-    for key in ("name", "department"):
-        val = request.form.get(key, "").strip()
-        if val:
-            updates[key] = val
-    pw = request.form.get("password", "").strip()
-    if pw:
-        updates["password"] = pw
-    ms = request.form.get("max_students")
-    if ms:
-        updates["max_students"] = int(ms)
-    updates["can_upload_students"] = 1 if request.form.get("can_upload_students") == "on" else 0
+    name = request.form.get("name", "").strip()
+    if name:
+        updates["name"] = name
+
+    requested_role = str(target.get("role") or "counselor").strip().lower() or "counselor"
+    if _is_system_admin(actor_role):
+        role_input = str(request.form.get("role") or requested_role).strip().lower()
+        if role_input not in {"admin", "chief_admin", "counselor"}:
+            flash("Invalid role selected.", "error")
+            return _redirect_admin_back("users")
+        requested_role = role_input
+        updates["role"] = requested_role
+
+    password = request.form.get("password", "").strip()
+    if password:
+        if len(password) < 6:
+            flash("Password must be at least 6 characters.", "error")
+            return _redirect_admin_back("users")
+        updates["password"] = password
+
+    if _is_system_admin(actor_role):
+        if requested_role == "admin":
+            updates["department"] = ""
+            updates["year_level"] = 1
+            updates["max_students"] = 500
+            updates["can_upload_students"] = 1
+        elif requested_role == "chief_admin":
+            department = (request.form.get("department") or "").strip().upper()
+            updates["department"] = department
+            updates["year_level"] = 1
+            updates["max_students"] = 500
+            updates["can_upload_students"] = 1
+        else:
+            department = (request.form.get("department") or "").strip().upper()
+            year_level = request.form.get("year_level", type=int)
+            if year_level not in (1, 2, 3, 4):
+                flash("Year must be between 1 and 4.", "error")
+                return _redirect_admin_back("users")
+
+            max_students_raw = request.form.get("max_students", "")
+            try:
+                max_students = int(max_students_raw)
+            except (TypeError, ValueError):
+                flash("Max students must be a valid number.", "error")
+                return _redirect_admin_back("users")
+
+            if max_students < 1 or max_students > 500:
+                flash("Max students must be between 1 and 500.", "error")
+                return _redirect_admin_back("users")
+
+            updates["department"] = department
+            updates["year_level"] = year_level
+            updates["max_students"] = max_students
+            updates["can_upload_students"] = 1 if request.form.get("can_upload_students") == "on" else 0
+    else:
+        department = (request.form.get("department") or target.get("department") or "").strip().upper()
+        year_level = request.form.get("year_level", type=int) or int(target.get("year_level") or 1)
+        requested_key = (department, year_level)
+
+        actor_scopes = _get_actor_scope_pairs(actor_email, actor_role) or set()
+        if requested_key not in actor_scopes:
+            flash("Update rejected: target department/year is outside your authorized assignments.", "error")
+            return _redirect_admin_back("users")
+
+        max_students_raw = request.form.get("max_students")
+        if max_students_raw:
+            try:
+                max_students = int(max_students_raw)
+            except (TypeError, ValueError):
+                flash("Max students must be a valid number.", "error")
+                return _redirect_admin_back("users")
+            if max_students < 1 or max_students > 500:
+                flash("Max students must be between 1 and 500.", "error")
+                return _redirect_admin_back("users")
+            updates["max_students"] = max_students
+
+        updates["can_upload_students"] = 1 if request.form.get("can_upload_students") == "on" else 0
 
     db.update_user(email, **updates)
+
+    if _is_system_admin(actor_role):
+        if requested_role == "chief_admin":
+            scope_values = request.form.getlist("chief_scopes")
+            parsed_scopes = []
+            for raw in scope_values:
+                dep, _, yr = str(raw or "").partition("::")
+                try:
+                    parsed_scopes.append((dep, int(yr)))
+                except (TypeError, ValueError):
+                    continue
+            db.set_chief_admin_scopes(email, parsed_scopes)
+        else:
+            db.set_chief_admin_scopes(email, [])
+
     flash("User updated.", "success")
     return _redirect_admin_back("users")
 
@@ -695,6 +1003,15 @@ def api_update_user(email):
 @login_required
 @admin_required
 def api_delete_user(email):
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    target = db.get_user(email)
+    if not target:
+        flash("User not found.", "error")
+        return _redirect_admin_back("users")
+    if _is_chief_admin(actor_role) and not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can delete only counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
     db.delete_user(email)
     flash("User deleted.", "success")
     return _redirect_admin_back("users")
@@ -704,6 +1021,12 @@ def api_delete_user(email):
 @login_required
 @admin_required
 def api_lock_user(email):
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    target = db.get_user(email)
+    if _is_chief_admin(actor_role) and not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can lock only counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
     db.lock_user(email, request.form.get("reason", "Locked by admin"))
     flash("User locked.", "success")
     return _redirect_admin_back("users")
@@ -713,15 +1036,69 @@ def api_lock_user(email):
 @login_required
 @admin_required
 def api_unlock_user(email):
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    target = db.get_user(email)
+    if _is_chief_admin(actor_role) and not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can unlock only counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
     db.unlock_user(email)
     flash("User unlocked.", "success")
     return _redirect_admin_back("users")
+
+
+@app.route("/api/password-update", methods=["POST"])
+@login_required
+def api_update_password():
+    """Update password for logged in user."""
+    user_email = session.get("user_email")
+    if not user_email:
+        flash("Session expired. Please login again.", "error")
+        return redirect(url_for("login"))
+    
+    current_password = request.form.get("current_password", "").strip()
+    new_password = request.form.get("new_password", "").strip()
+    confirm_password = request.form.get("confirm_password", "").strip()
+    
+    # Validate inputs
+    if not current_password or not new_password or not confirm_password:
+        flash("All password fields are required.", "error")
+        return redirect(request.referrer or url_for("admin"))
+    
+    if len(new_password) < 6:
+        flash("New password must be at least 6 characters.", "error")
+        return redirect(request.referrer or url_for("admin"))
+    
+    if new_password != confirm_password:
+        flash("Passwords do not match.", "error")
+        return redirect(request.referrer or url_for("admin"))
+    
+    # Verify current password
+    user = db.get_user(user_email) or {}
+    stored_hash = user.get("password_hash")
+    
+    if not stored_hash or not hashlib.sha256(current_password.encode()).hexdigest() == stored_hash:
+        flash("Current password is incorrect.", "error")
+        return redirect(request.referrer or url_for("admin"))
+    
+    # Update password
+    new_hash = hashlib.sha256(new_password.encode()).hexdigest()
+    db.update_user_password(user_email, new_hash)
+    
+    flash("Password updated successfully.", "success")
+    return redirect(request.referrer or url_for("admin"))
 
 
 @app.route("/api/users/<path:email>/upload-students", methods=["POST"])
 @login_required
 @admin_required
 def api_upload_students_for_counselor(email):
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    target = db.get_user(email)
+    if _is_chief_admin(actor_role) and not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can upload students only for counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
     f = request.files.get("student_file")
     if not f or not f.filename:
         flash("No file selected.", "error")
@@ -743,6 +1120,12 @@ def api_upload_students_for_counselor(email):
 @login_required
 @admin_required
 def api_force_logout(email):
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    target = db.get_user(email)
+    if _is_chief_admin(actor_role) and not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can force logout only counselors in your assigned scope.", "error")
+        return _redirect_admin_back("users")
     db.force_logout_user(email, "admin_action")
     flash(f"Force-logged-out {email}.", "success")
     return _redirect_admin_back("users")
@@ -752,6 +1135,8 @@ def api_force_logout(email):
 @login_required
 @admin_required
 def api_admin_reset_password():
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
     target_email = request.form.get("target_email", "").strip()
     new_password = request.form.get("new_password", "")
     confirm_password = request.form.get("confirm_password", "")
@@ -773,6 +1158,10 @@ def api_admin_reset_password():
     if not user:
         flash("Selected user was not found.", "error")
         return redirect(url_for("admin", tab="config"))
+
+    if _is_chief_admin(actor_role) and not _can_chief_admin_touch_user(actor_email, user):
+        flash("You can reset passwords only for counselors in your assigned scope.", "error")
+        return redirect(url_for("admin", tab="users"))
 
     db.update_user(target_email, password=new_password)
 
@@ -873,6 +1262,9 @@ def api_admin_delete_all_students():
 @login_required
 @admin_required
 def api_create_department():
+    if _is_chief_admin(session.get("role")):
+        flash("Only system admin can create departments.", "error")
+        return _redirect_admin_back("departments")
     code = request.form.get("code", "").strip().upper()
     name = request.form.get("name", "").strip()
     color = request.form.get("color", "#667eea")
@@ -888,6 +1280,9 @@ def api_create_department():
 @login_required
 @admin_required
 def api_delete_department(dept_id):
+    if _is_chief_admin(session.get("role")):
+        flash("Only system admin can delete departments.", "error")
+        return _redirect_admin_back("departments")
     db.delete_department(dept_id)
     flash("Department deleted.", "success")
     return _redirect_admin_back("departments")
@@ -897,6 +1292,11 @@ def api_delete_department(dept_id):
 @login_required
 @admin_required
 def api_toggle_department(dept_id):
+    actor_role = session.get("role")
+    if _is_chief_admin(actor_role):
+        flash("Only system admin can enable or disable departments.", "error")
+        return _redirect_admin_back("departments")
+
     is_active = request.form.get("is_active") == "1"
     db.update_department(dept_id, is_active=0 if is_active else 1)
     flash("Department updated.", "success")
@@ -1019,7 +1419,11 @@ def api_reset_theme():
 @login_required
 @admin_required
 def api_export_activity_csv():
-    data = db.get_counselor_activity_summary()
+    data = _filter_activity_for_actor(
+        db.get_counselor_activity_summary(),
+        session.get("user_email"),
+        session.get("role"),
+    )
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["Name", "Email", "Department", "Students", "Tests",
@@ -1044,7 +1448,11 @@ def api_export_activity_excel():
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
 
-    data = db.get_counselor_activity_summary()
+    data = _filter_activity_for_actor(
+        db.get_counselor_activity_summary(),
+        session.get("user_email"),
+        session.get("role"),
+    )
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Counselor Activity"
@@ -1085,7 +1493,11 @@ def api_export_activity_excel():
 @login_required
 @admin_required
 def api_export_activity_pdf():
-    data = db.get_counselor_activity_summary()
+    data = _filter_activity_for_actor(
+        db.get_counselor_activity_summary(),
+        session.get("user_email"),
+        session.get("role"),
+    )
     pdf = FPDF("L")
     pdf.add_page()
     pdf.set_font("Arial", "B", 16)
@@ -1128,6 +1540,11 @@ def api_export_activity_pdf():
 @login_required
 @admin_required
 def api_activity_detail(email):
+    if _is_chief_admin(session.get("role")):
+        target = db.get_user(email)
+        if not _can_chief_admin_touch_user(session.get("user_email"), target):
+            return jsonify({"error": "Access denied"}), 403
+
     detail = db.get_counselor_detailed_activity(email)
     if not detail:
         return jsonify({"error": "Not found"}), 404
@@ -1191,11 +1608,17 @@ def api_delete_all_students():
 @admin_required
 def api_delete_test(test_id):
     try:
+        actor_email = session.get("user_email")
+        actor_role = session.get("role")
+        meta = db.get_test_metadata(test_id) or {}
+        if not _can_manage_department_year(actor_email, actor_role, meta.get("department"), meta.get("year_level") or 1):
+            flash("You can manage tests only in your assigned department/year scope.", "error")
+            return _redirect_admin_back("reports")
         db.delete_test(test_id)
         flash("Test deleted successfully.", "success")
     except Exception as e:
         flash(f"Failed to delete test: {e}", "error")
-    return _redirect_admin_back("tests")
+    return _redirect_admin_back("reports")
 
 
 @app.route("/api/tests/<int:test_id>/update", methods=["POST"])
@@ -1203,6 +1626,12 @@ def api_delete_test(test_id):
 @admin_required
 def api_update_test(test_id):
     try:
+        actor_email = session.get("user_email")
+        actor_role = session.get("role")
+        meta = db.get_test_metadata(test_id) or {}
+        if not _can_manage_department_year(actor_email, actor_role, meta.get("department"), meta.get("year_level") or 1):
+            flash("You can manage tests only in your assigned department/year scope.", "error")
+            return _redirect_admin_back("reports")
         db.update_test_metadata_fields(
             test_id,
             test_name=request.form.get("test_name", "").strip(),
@@ -1214,7 +1643,121 @@ def api_update_test(test_id):
         flash("Test updated successfully.", "success")
     except Exception as e:
         flash(f"Failed to update test: {e}", "error")
-    return _redirect_admin_back("tests")
+    return _redirect_admin_back("reports")
+
+
+@app.route("/api/admin/tests/upload", methods=["POST"])
+@login_required
+@admin_required
+def api_admin_upload_marksheet():
+    f = request.files.get("marks_file")
+    if not f or not f.filename:
+        flash("No marks file selected.", "error")
+        return _redirect_admin_back("reports")
+
+    department = (request.form.get("department") or "").strip().upper()
+    year_level = request.form.get("year_level", type=int) or 1
+    semester = (request.form.get("semester") or "").strip()
+    batch_name = (request.form.get("batch_name") or "").strip()
+    section = (request.form.get("section") or "").strip()
+    test_name_input = (request.form.get("test_name") or "").strip()
+    upload_mode = (request.form.get("upload_mode") or "new").strip().lower()
+
+    if not department or year_level not in (1, 2, 3, 4) or not semester or not batch_name:
+        flash("Department, year, semester and batch are required.", "error")
+        return _redirect_admin_back("reports", report_dept=department, report_year=year_level)
+
+    if not _can_manage_department_year(session.get("user_email"), session.get("role"), department, year_level):
+        flash("You can upload tests only in your assigned department/year scope.", "error")
+        return _redirect_admin_back("reports", report_dept=department, report_year=year_level)
+
+    try:
+        file_bytes = f.read()
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
+
+        from core.intelligent_parser import IntelligentParser
+        parser = IntelligentParser()
+        test_info, students = parser.parse_file(io.BytesIO(file_bytes), f.filename)
+
+        if not students:
+            flash("No student marks data found in file.", "error")
+            return _redirect_admin_back("reports", report_dept=department, report_year=year_level)
+
+        subjects = [s["name"] for s in test_info.subjects]
+        if not subjects:
+            flash("Upload blocked: no subject columns detected.", "warning")
+            return _redirect_admin_back("reports", report_dept=department, report_year=year_level)
+
+        student_data = [s.to_dict() for s in students]
+        test_name = test_name_input or (test_info.test_name or "Unit Test")
+
+        existing = db.find_existing_department_year_test(
+            department=department,
+            year_level=year_level,
+            semester=semester,
+            test_name=test_name,
+            batch_name=batch_name,
+        )
+
+        replace_test_id = None
+        if existing:
+            if (existing.get("file_hash") or "") == file_hash:
+                flash("Duplicate file detected for this department/year/test. Upload blocked.", "warning")
+                return _redirect_admin_back("reports", report_dept=department, report_year=year_level)
+            if upload_mode == "replace":
+                replace_test_id = int(existing.get("test_id"))
+
+        ok, msg = db.save_test_marks(
+            test_name=test_name,
+            semester=semester,
+            counselor_email=session["user_email"],
+            students=student_data,
+            subjects=subjects,
+            batch_name=batch_name,
+            department=department,
+            section=section,
+            file_hash=file_hash,
+            replace_test_id=replace_test_id,
+            sync_students=False,
+            year_level=year_level,
+            enforce_assigned_match=False,
+            uploaded_by=session["user_email"],
+        )
+        if ok:
+            flash(f"Marksheet uploaded for {department} Year {year_level} ({len(student_data)} students).", "success")
+        else:
+            flash(f"Upload failed: {msg}", "error")
+    except Exception as e:
+        flash(f"Upload failed: {e}", "error")
+
+    return _redirect_admin_back("reports", report_dept=department, report_year=year_level)
+
+
+@app.route("/api/tests/<int:test_id>/counselor-update", methods=["POST"])
+@login_required
+def api_counselor_update_test(test_id):
+    email = session.get("user_email")
+    role = session.get("role", "counselor")
+    if _is_counselor_department_blocked(email, role):
+        flash("Your department is blocked. Editing is disabled.", "warning")
+        return redirect(url_for("counselor_page", tab="test-database"))
+    if not _can_access_test_for_user(test_id, email, role):
+        flash("Access denied for this test.", "error")
+        return redirect(url_for("counselor_page", tab="test-database"))
+
+    try:
+        db.update_test_metadata_fields(
+            test_id,
+            test_name=request.form.get("test_name", "").strip(),
+            semester=request.form.get("semester", "").strip(),
+            batch_name=request.form.get("batch_name", "").strip(),
+            section=request.form.get("section", "").strip(),
+        )
+        flash("Test details updated.", "success")
+    except Exception as e:
+        flash(f"Could not update test: {e}", "error")
+
+    return redirect(url_for("counselor_page", tab="test-database"))
 
 
 @app.route("/api/tests/<int:test_id>/marks")
@@ -1222,18 +1765,47 @@ def api_update_test(test_id):
 def api_get_test_marks(test_id):
     """Get test marks grouped by student for display."""
     try:
-        # Access control: admin can view all, counselors can view only their uploads
-        if session.get("role") != "admin":
-            counselor_email = session.get("user_email")
-            allowed_tests = db.get_visible_tests_for_counselor(counselor_email)
-            allowed_ids = {int(t.get("id")) for t in allowed_tests if t.get("id") is not None}
-            if test_id not in allowed_ids:
-                return jsonify({"success": False, "error": "Access denied for this test."}), 403
+        user_email = session.get("user_email")
+        role = session.get("role")
+        if not _can_access_test_for_user(test_id, user_email, role):
+            return jsonify({"success": False, "error": "Access denied for this test."}), 403
 
-        data = db.get_test_marks_grouped(test_id)
+        if role == "counselor":
+            data = db.get_test_marks_grouped_for_counselor(test_id, user_email)
+        else:
+            data = db.get_test_marks_grouped(test_id)
         return jsonify({"success": True, "data": data})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/counselor/tests/<int:test_id>/marks/update", methods=["POST"])
+@login_required
+def api_counselor_update_marks(test_id):
+    email = session.get("user_email")
+    role = session.get("role")
+    if role != "counselor":
+        return jsonify({"success": False, "error": "Counselor access required."}), 403
+    if not _can_access_test_for_user(test_id, email, role):
+        return jsonify({"success": False, "error": "Access denied."}), 403
+    if _is_counselor_department_blocked(email, role):
+        return jsonify({"success": False, "error": "Department is blocked. Editing disabled."}), 403
+
+    try:
+        payload = request.get_json(force=True, silent=False) or {}
+        reg_no = str(payload.get("reg_no") or "").strip()
+        marks = payload.get("marks") or {}
+        if not reg_no or not isinstance(marks, dict):
+            return jsonify({"success": False, "error": "Invalid payload."}), 400
+
+        for subject_name, value in marks.items():
+            if not str(subject_name or "").strip():
+                continue
+            db.upsert_counselor_mark_override(email, test_id, reg_no, str(subject_name), str(value or ""))
+
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route("/api/tests/cleanup-duplicates", methods=["POST"])
@@ -1248,12 +1820,17 @@ def api_tests_cleanup_duplicates():
             flash("No duplicate tests found.", "info")
     except Exception as e:
         flash(f"Failed to cleanup duplicates: {e}", "error")
-    return _redirect_admin_back("tests")
+    return _redirect_admin_back("reports")
 
 
 @app.route("/api/marks/upload", methods=["POST"])
 @login_required
 def api_upload_marks():
+    flash("Marksheet upload is now admin-only. Use Departments tab in Admin panel.", "warning")
+    if _is_admin_portal_user(session.get("role")):
+        return _redirect_admin_back("reports")
+    return redirect(url_for("counselor_page", tab="test-database"))
+
     email = session["user_email"]
     user = db.get_user(email) or {}
     f = request.files.get("marks_file")
@@ -1280,33 +1857,59 @@ def api_upload_marks():
 
         if not subjects:
             flash("UPLOAD BLOCKED: HEADER INTEGRITY FAILED - no subject columns detected. FILE NOT UPLOADED.", "warning")
-            return redirect(url_for("counselor_page", tab="reports"))
+            return redirect(url_for("counselor_page", tab="test-database"))
 
         def _norm_dept(value):
             return re.sub(r"[^A-Za-z0-9]", "", str(value or "").upper())
 
-        counselor_department = (user.get("department") or "").strip()
-        parsed_department = (test_info.department or "").strip()
-        if not counselor_department:
-            flash("UPLOAD BLOCKED: counselor department is not configured. Contact admin. FILE NOT UPLOADED.", "warning")
-            return redirect(url_for("counselor_page", tab="reports"))
-        if not parsed_department:
-            flash("UPLOAD BLOCKED: HEADER INTEGRITY FAILED - department not detected in marksheet header. FILE NOT UPLOADED.", "warning")
-            return redirect(url_for("counselor_page", tab="reports"))
-        if _norm_dept(parsed_department) != _norm_dept(counselor_department):
-            flash(
-                f"UPLOAD BLOCKED: NO MATCH - marksheet department '{parsed_department}' does not match your department '{counselor_department}'. FILE NOT UPLOADED.",
-                "warning",
-            )
-            return redirect(url_for("counselor_page", tab="reports"))
-
-        # Enforce counselor scope: only admin-assigned students whose Reg No + Name match.
         def _norm_reg(value):
             reg = str(value or "").strip().replace(" ", "")
             if reg.endswith(".0"):
                 reg = reg[:-2]
             return reg.upper()
 
+        def _infer_department_from_regnos(rows):
+            """Best-effort department inference using configured register patterns."""
+            score = {}
+            for st in rows:
+                reg = _norm_reg(st.get("reg_no"))
+                if not reg:
+                    continue
+                digits = "".join(ch for ch in reg if ch.isdigit())
+                if not digits:
+                    continue
+                for dept_code, pattern in DEPT_REG_PATTERNS.items():
+                    if str(pattern) and str(pattern) in digits:
+                        score[dept_code] = score.get(dept_code, 0) + 1
+
+            if not score:
+                return ""
+            winner = max(score, key=score.get)
+            return winner
+
+        counselor_department = (user.get("department") or "").strip()
+        parsed_department = (test_info.department or "").strip()
+        if not counselor_department:
+            flash("UPLOAD BLOCKED: counselor department is not configured. Contact admin. FILE NOT UPLOADED.", "warning")
+            return redirect(url_for("counselor_page", tab="test-database"))
+
+        if not parsed_department:
+            parsed_department = _infer_department_from_regnos(student_data)
+
+        if not parsed_department:
+            # Header formats vary a lot across departments; fallback keeps uploads usable
+            # while counselor ownership checks below still prevent cross-department data injection.
+            parsed_department = counselor_department
+            flash("Header department not detected. Used your counselor department for validation.", "info")
+
+        if _norm_dept(parsed_department) != _norm_dept(counselor_department):
+            flash(
+                f"UPLOAD BLOCKED: NO MATCH - marksheet department '{parsed_department}' does not match your department '{counselor_department}'. FILE NOT UPLOADED.",
+                "warning",
+            )
+            return redirect(url_for("counselor_page", tab="test-database"))
+
+        # Enforce counselor scope: only admin-assigned students whose Reg No + Name match.
         def _norm_name(value):
             name = str(value or "").strip().lower()
             name = re.sub(r"\s+", " ", name)
@@ -1345,7 +1948,7 @@ def api_upload_marks():
                 f"UPLOAD BLOCKED: NO MATCH - no assigned students matched by Reg No + Name. Examples: {sample}. FILE NOT UPLOADED.",
                 "warning",
             )
-            return redirect(url_for("counselor_page", tab="reports"))
+            return redirect(url_for("counselor_page", tab="test-database"))
 
         total_rows = len(student_data)
         if mismatch_count > 0:
@@ -1387,7 +1990,7 @@ def api_upload_marks():
         if existing_test and upload_mode != "replace":
             if (existing_test.get("file_hash") or "") == file_hash:
                 flash("UPLOAD BLOCKED: DUPLICATE FILE for this department/test. FILE NOT UPLOADED.", "warning")
-                return redirect(url_for("counselor_page", tab="reports"))
+                return redirect(url_for("counselor_page", tab="test-database"))
             replace_test_id = int(existing_test.get("test_id"))
 
         if upload_mode == "replace" and not replace_test_id and existing_test:
@@ -1421,12 +2024,15 @@ def api_upload_marks():
                 flash(f"Error: {msg}", "error")
     except Exception as e:
         flash(f"Parse error: {e}", "error")
-    return redirect(url_for("counselor_page", tab="reports"))
+    return redirect(url_for("counselor_page", tab="test-database"))
 
 
 def _can_access_test_for_user(test_id: int, user_email: str, role: str) -> bool:
-    if role == "admin":
+    if _is_system_admin(role):
         return True
+    if _is_chief_admin(role):
+        meta = db.get_test_metadata(test_id) or {}
+        return _can_manage_department_year(user_email, role, meta.get("department"), meta.get("year_level") or 1)
     tests = db.get_visible_tests_for_counselor(user_email)
     allowed_ids = {int(t.get("id")) for t in tests if t.get("id") is not None}
     return test_id in allowed_ids
@@ -1439,10 +2045,13 @@ def counselor_test_view_page(test_id):
     role = session.get("role", "counselor")
     if not _can_access_test_for_user(test_id, email, role):
         flash("Access denied for this test.", "error")
-        return redirect(url_for("counselor_page", tab="reports"))
+        return redirect(url_for("counselor_page", tab="test-database"))
+    if _is_counselor_department_blocked(email, role):
+        flash("Your department is blocked. Contact system admin.", "warning")
+        return redirect(url_for("counselor_page", tab="recent-tests"))
 
     test_meta = db.get_test_metadata(test_id) or {}
-    grouped = db.get_test_marks_grouped(test_id)
+    grouped = db.get_test_marks_grouped_for_counselor(test_id, email) if role == "counselor" else db.get_test_marks_grouped(test_id)
     if role != "admin":
         def _norm_reg(value):
             reg = str(value or "").strip().replace(" ", "")
@@ -1471,7 +2080,10 @@ def counselor_test_send_page(test_id):
     role = session.get("role", "counselor")
     if not _can_access_test_for_user(test_id, email, role):
         flash("Access denied for this test.", "error")
-        return redirect(url_for("counselor_page", tab="reports"))
+        return redirect(url_for("counselor_page", tab="test-database"))
+    if _is_counselor_department_blocked(email, role):
+        flash("Your department is blocked. Sending is disabled.", "warning")
+        return redirect(url_for("counselor_page", tab="recent-tests"))
 
     user = db.get_user(email)
     students = db.get_students(email)
@@ -1482,7 +2094,7 @@ def counselor_test_send_page(test_id):
         return reg.upper()
 
     by_reg = {_norm_reg(s.get("reg_no")): s for s in students}
-    grouped = db.get_test_marks_grouped(test_id)
+    grouped = db.get_test_marks_grouped_for_counselor(test_id, email) if role == "counselor" else db.get_test_marks_grouped(test_id)
     test_meta = db.get_test_metadata(test_id) or {}
     sent_reg_nos = {_norm_reg(r) for r in db.get_sent_reg_nos_for_test(email, test_id)}
 
@@ -1518,16 +2130,20 @@ def api_send_single_report():
     test_id = request.form.get("test_id", type=int)
     reg_no = request.form.get("reg_no", "").strip()
     action = request.form.get("action", "cancel")
+    is_ajax = request.form.get("ajax") == "1"
 
     if not test_id or not reg_no:
         flash("Test and student are required.", "error")
-        return redirect(url_for("counselor_page", tab="reports"))
+        return redirect(url_for("counselor_page", tab="test-database"))
 
     if not _can_access_test_for_user(test_id, email, role):
         flash("Access denied for this test.", "error")
-        return redirect(url_for("counselor_page", tab="reports"))
-
-    is_ajax = request.form.get("ajax") == "1"
+        return redirect(url_for("counselor_page", tab="test-database"))
+    if _is_counselor_department_blocked(email, role):
+        flash("Your department is blocked. Sending is disabled.", "warning")
+        if is_ajax:
+            return jsonify({"success": False, "error": "Department is blocked."}), 403
+        return redirect(url_for("counselor_page", tab="recent-tests"))
 
     if action != "send":
         flash("Message status kept as Pending.", "info")
@@ -1550,7 +2166,10 @@ def api_send_single_report():
         flash("Student not found under your account.", "error")
         return redirect(url_for("counselor_test_send_page", test_id=test_id))
 
-    marks = db.get_student_marks_for_reg(test_id, normalized_reg)
+    if role == "counselor":
+        marks = db.get_student_marks_for_reg_for_counselor(test_id, normalized_reg, email)
+    else:
+        marks = db.get_student_marks_for_reg(test_id, normalized_reg)
     if not marks:
         flash("No marks found for selected student.", "error")
         return redirect(url_for("counselor_test_send_page", test_id=test_id))
@@ -1661,7 +2280,7 @@ def api_generate_reports():
 
     if not test_id or not reg_nos:
         flash("Select a test and at least one student.", "error")
-        return redirect(url_for("counselor_page", tab="reports", test_id=test_id or ""))
+        return redirect(url_for("counselor_page", tab="test-database", test_id=test_id or ""))
 
     test_id = int(test_id)
     user = db.get_user(email)
@@ -1733,7 +2352,7 @@ def api_generate_reports():
     session["reports"] = reports
     session["report_test_id"] = test_id
     flash(f"Reports generated for {len(reports)} pending students.", "success")
-    return redirect(url_for("counselor_page", tab="reports", test_id=test_id))
+    return redirect(url_for("counselor_page", tab="test-database", test_id=test_id))
 
 
 @app.route("/api/reports/pdf/<reg_no>")

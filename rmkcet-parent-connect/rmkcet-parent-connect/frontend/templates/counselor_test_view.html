@@ -4,8 +4,8 @@
 
 {% block content %}
 <div class="d-flex justify-between align-center mb-2">
-  <a href="{{ url_for('counselor_page', tab='reports') }}" class="btn btn-outline btn-sm"><i class="fas fa-arrow-left"></i> Back</a>
-  <span class="badge badge-info">Test ID: {{ test_id }}</span>
+  <a href="{{ url_for('counselor_page', tab='test-database') }}" class="btn btn-outline btn-sm"><i class="fas fa-arrow-left"></i> Back</a>
+  <span class="badge badge-info">{{ test_meta.test_name or 'Selected Test' }}</span>
 </div>
 
 <div class="card mb-2">
@@ -29,6 +29,7 @@
         {% for s in subjects %}
         <th>{{ s }}</th>
         {% endfor %}
+        <th>Save</th>
       </tr>
     </thead>
     <tbody>
@@ -37,14 +38,48 @@
         <td><strong>{{ st.reg_no }}</strong></td>
         <td>{{ st.department or '—' }}</td>
         {% for s in subjects %}
-        <td>{{ st.marks.get(s, '-') }}</td>
+        <td>
+          <input class="form-control" id="mark-{{ st.reg_no }}-{{ loop.index0 }}" data-subject="{{ s }}" value="{{ st.marks.get(s, '-') }}" style="min-width:90px;">
+        </td>
         {% endfor %}
+        <td>
+          <button class="btn btn-primary btn-sm" onclick="saveStudentMarks('{{ st.reg_no }}')"><i class="fas fa-save"></i></button>
+        </td>
       </tr>
       {% endfor %}
       {% if not students %}
-      <tr><td colspan="{{ 2 + (subjects|length) }}" class="text-center text-muted" style="padding:18px;">No student marks found.</td></tr>
+      <tr><td colspan="{{ 3 + (subjects|length) }}" class="text-center text-muted" style="padding:18px;">No student marks found.</td></tr>
       {% endif %}
     </tbody>
   </table>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+async function saveStudentMarks(regNo) {
+  const inputs = Array.from(document.querySelectorAll(`input[id^="mark-${regNo}-"]`));
+  const marks = {};
+  inputs.forEach((input) => {
+    marks[input.dataset.subject] = (input.value || '').trim();
+  });
+
+  try {
+    const response = await fetch('{{ url_for("api_counselor_update_marks", test_id=test_id) }}', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'same-origin',
+      body: JSON.stringify({ reg_no: regNo, marks })
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.success) {
+      alert(payload.error || 'Unable to save marks.');
+      return;
+    }
+    alert('Saved in your personal counselor database.');
+  } catch (error) {
+    alert('Unable to save marks. Please try again.');
+  }
+}
+</script>
 {% endblock %}

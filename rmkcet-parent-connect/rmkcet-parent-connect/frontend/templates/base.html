@@ -40,21 +40,15 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-header">
       <div class="logo-area">
-        <div class="logo-icon">🎓</div>
+        <img src="{{ url_for('static', filename='assets/shine-logo.png') }}" alt="RMKCET SHINE Logo" class="logo-image">
         <div class="logo-text">
-          <span class="logo-title">RMKCET</span>
-          <span class="logo-subtitle">Parent Connect</span>
+          <span class="logo-subtitle-main">S&H Internal Notification Engine</span>
         </div>
       </div>
-      {% if current_role == 'admin' %}
-      <a href="{{ url_for('admin', tab='config') }}" class="logo-settings" title="Configuration">
-        <i class="fas fa-cog"></i>
-      </a>
-      {% endif %}
     </div>
 
     <nav class="sidebar-nav">
-      {% if current_role == 'admin' %}
+      {% if current_role in ['admin', 'chief_admin'] %}
       {% set active_admin_tab = request.args.get('tab', 'users') %}
       <a href="{{ url_for('admin', tab='users') }}" class="nav-link tab-nav {% if active_admin_tab == 'users' %}active{% endif %}" data-tab="users">
         <i class="fas fa-users"></i><span>Users</span>
@@ -62,25 +56,30 @@
       <a href="{{ url_for('admin', tab='departments') }}" class="nav-link tab-nav {% if active_admin_tab == 'departments' %}active{% endif %}" data-tab="departments">
         <i class="fas fa-building"></i><span>Departments</span>
       </a>
-      <a href="{{ url_for('admin', tab='tests') }}" class="nav-link tab-nav {% if active_admin_tab == 'tests' %}active{% endif %}" data-tab="tests">
-        <i class="fas fa-clipboard-check"></i><span>Test History</span>
+      <a href="{{ url_for('admin', tab='reports') }}" class="nav-link tab-nav {% if active_admin_tab == 'reports' %}active{% endif %}" data-tab="reports">
+        <i class="fas fa-file-lines"></i><span>Reports</span>
       </a>
       <a href="{{ url_for('admin', tab='activity') }}" class="nav-link tab-nav {% if active_admin_tab == 'activity' %}active{% endif %}" data-tab="activity">
         <i class="fas fa-chart-line"></i><span>Counselor Activity</span>
       </a>
+      {% if current_role == 'admin' %}
       <a href="{{ url_for('admin', tab='monitoring') }}" class="nav-link tab-nav {% if active_admin_tab == 'monitoring' %}active{% endif %}" data-tab="monitoring">
         <i class="fas fa-chart-area"></i><span>Session Monitoring</span>
       </a>
+      {% endif %}
       <a href="{{ url_for('admin', tab='messages') }}" class="nav-link tab-nav {% if active_admin_tab == 'messages' %}active{% endif %}" data-tab="messages">
         <i class="fas fa-envelope"></i><span>Message Logs</span>
       </a>
       {% else %}
-      {% set active_counselor_tab = request.args.get('tab', 'reports') %}
-      <a href="{{ url_for('counselor_page', tab='reports') }}" class="nav-link tab-nav {% if active_counselor_tab == 'reports' %}active{% endif %}" data-tab="reports">
-        <i class="fas fa-file-lines"></i><span>Reports</span>
+      {% set active_counselor_tab = request.args.get('tab', 'recent-tests') %}
+      <a href="{{ url_for('counselor_page', tab='recent-tests') }}" class="nav-link tab-nav {% if active_counselor_tab == 'recent-tests' %}active{% endif %}" data-tab="recent-tests">
+        <i class="fas fa-clock"></i><span>Recent Tests</span>
       </a>
-      <a href="{{ url_for('counselor_page', tab='history') }}" class="nav-link tab-nav {% if active_counselor_tab == 'history' %}active{% endif %}" data-tab="history">
-        <i class="fas fa-history"></i><span>History</span>
+      <a href="{{ url_for('counselor_page', tab='test-database') }}" class="nav-link tab-nav {% if active_counselor_tab == 'test-database' %}active{% endif %}" data-tab="test-database">
+        <i class="fas fa-database"></i><span>Test Database</span>
+      </a>
+      <a href="{{ url_for('counselor_page', tab='message-history') }}" class="nav-link tab-nav {% if active_counselor_tab == 'message-history' %}active{% endif %}" data-tab="message-history">
+        <i class="fas fa-envelope-open-text"></i><span>Message History</span>
       </a>
       {% endif %}
     </nav>
@@ -104,9 +103,23 @@
       <button class="mobile-toggle" id="mobileToggle"><i class="fas fa-bars"></i></button>
       <h1 class="page-title">{% block page_title %}Panel{% endblock %}</h1>
       <div class="header-actions">
-        <button class="btn btn-outline btn-sm" id="themeToggle" type="button" title="Toggle theme">
-          <i class="fas fa-sun" id="themeToggleIcon"></i>
-        </button>
+        <div class="icon-group">
+          <button class="btn btn-outline btn-sm icon-btn" id="themeToggle" type="button" title="Toggle theme">
+            <i class="fas fa-sun" id="themeToggleIcon"></i>
+            <span>Theme</span>
+          </button>
+          {% if current_role == 'admin' %}
+          <a href="{{ url_for('admin', tab='config') }}" class="btn btn-outline btn-sm icon-btn" title="Settings">
+            <i class="fas fa-cog"></i>
+            <span>Settings</span>
+          </a>
+          {% elif current_role == 'chief_admin' %}
+          <button class="btn btn-outline btn-sm icon-btn" onclick="openPasswordResetModal()" type="button" title="Credential Reset">
+            <i class="fas fa-key"></i>
+            <span>Credential Reset</span>
+          </button>
+          {% endif %}
+        </div>
         <span class="header-badge"><i class="fas fa-clock"></i> {{ now.strftime('%d %b %Y, %H:%M') }}</span>
       </div>
     </header>
@@ -130,6 +143,19 @@
     <div class="content-area">
       {% block content %}{% endblock %}
     </div>
+
+    <footer class="global-footer">
+      <div class="global-footer-inner">
+        <div class="global-footer-left">
+          <img src="{{ url_for('static', filename='assets/banner.png') }}" alt="RMKCET Banner" class="global-footer-banner-image">
+          <span class="global-footer-text">Department of Science and Humanities</span>
+        </div>
+        <div class="global-footer-links">
+          <a href="#" class="global-footer-link">Support</a>
+          <a href="#" class="global-footer-link">Documentation</a>
+        </div>
+      </div>
+    </footer>
   </main>
 
   {% else %}
@@ -151,6 +177,46 @@
     {% block content_login %}{% endblock %}
   </main>
   {% endif %}
+
+  <!-- Password Reset Modal -->
+  <div class="modal-overlay" id="modal-password-reset">
+    <div class="modal" style="max-width:480px;">
+      <div class="modal-header">
+        <h3><i class="fas fa-key"></i> Change Password</h3>
+        <button class="modal-close" onclick="closeModal('password-reset')">&times;</button>
+      </div>
+      <form method="POST" action="{{ url_for('api_update_password') }}">
+        <div class="form-group">
+          <label class="form-label">Current Password</label>
+          <div class="d-flex align-center" style="gap:8px;">
+            <input type="password" class="form-control" id="currentPassword" name="current_password" required>
+            <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('currentPassword', 'iconCurrentPassword')">
+              <i id="iconCurrentPassword" class="fas fa-eye"></i>
+            </button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">New Password</label>
+          <div class="d-flex align-center" style="gap:8px;">
+            <input type="password" class="form-control" id="newPassword" name="new_password" required minlength="6" placeholder="Min 6 characters">
+            <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('newPassword', 'iconNewPassword')">
+              <i id="iconNewPassword" class="fas fa-eye"></i>
+            </button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Confirm New Password</label>
+          <div class="d-flex align-center" style="gap:8px;">
+            <input type="password" class="form-control" id="confirmPassword" name="confirm_password" required minlength="6" placeholder="Re-enter password">
+            <button type="button" class="btn btn-outline btn-sm btn-icon" onclick="togglePasswordInput('confirmPassword', 'iconConfirmPassword')">
+              <i id="iconConfirmPassword" class="fas fa-eye"></i>
+            </button>
+          </div>
+        </div>
+        <button type="submit" class="btn btn-primary" style="width:100%;"><i class="fas fa-save"></i> Update Password</button>
+      </form>
+    </div>
+  </div>
 
   <script src="{{ url_for('static', filename='js/app.js') }}"></script>
   {% block scripts %}{% endblock %}

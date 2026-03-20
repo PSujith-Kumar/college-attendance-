@@ -4,8 +4,8 @@
 
 {% block content %}
 <div class="d-flex justify-between align-center mb-2" style="gap:12px;">
-  <a href="{{ url_for('counselor_page', tab='reports') }}" class="btn btn-outline btn-sm"><i class="fas fa-arrow-left"></i> Back</a>
-  <span class="badge badge-info">Test ID: {{ test_id }}</span>
+  <a href="{{ url_for('counselor_page', tab='test-database') }}" class="btn btn-outline btn-sm"><i class="fas fa-arrow-left"></i> Back</a>
+  <span class="badge badge-info">{{ test_meta.test_name or 'Selected Test' }}</span>
 </div>
 
 <div class="card mb-3">
@@ -25,10 +25,7 @@
       <label class="form-label">Batch</label>
       <input id="varBatch" class="form-control" value="{{ test_meta.batch_name or '' }}">
     </div>
-    <div class="form-group">
-      <label class="form-label">Section</label>
-      <input id="varSection" class="form-control" value="{{ test_meta.section or '' }}">
-    </div>
+    <div class="form-group"></div>
   </div>
   <div class="form-group">
     <label class="form-label">Message Template</label>
@@ -43,6 +40,14 @@
   PRINCIPAL
   RMKCET</textarea>
   </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-title"><i class="fas fa-list-check"></i> Parsing Fields and Order</div>
+  <p style="font-size:.82rem;color:var(--text-dim);margin-bottom:10px;">
+    Enable/disable fields and reorder them using arrows. This only affects your message formatting.
+  </p>
+  <div id="parseFieldList" class="table-wrapper" style="padding:8px;"></div>
 </div>
 
 <div class="table-wrapper">
@@ -108,7 +113,6 @@
       <input type="hidden" name="test_name" id="formTestName">
       <input type="hidden" name="semester" id="formSemester">
       <input type="hidden" name="batch_name" id="formBatchName">
-      <input type="hidden" name="section" id="formSection">
       <input type="hidden" name="department" id="formDepartment">
       <input type="hidden" name="message_template" id="formTemplate">
       <input type="hidden" name="action" id="formAction" value="cancel">
@@ -124,6 +128,7 @@
 {% block scripts %}
 <script>
 let activeSendButton = null;
+let parseFields = [];
 
 function getCommonVarsStorageKey() {
   return `send_common_vars_{{ test_id }}`;
@@ -134,8 +139,8 @@ function saveCommonVarsToStorage() {
     test_name: document.getElementById('varTestName').value || '',
     semester: document.getElementById('varSemester').value || '',
     batch_name: document.getElementById('varBatch').value || '',
-    section: document.getElementById('varSection').value || '',
     template: document.getElementById('varTemplate').value || '',
+    parse_fields: parseFields,
   };
   localStorage.setItem(getCommonVarsStorageKey(), JSON.stringify(payload));
 }
@@ -148,15 +153,18 @@ function loadCommonVarsFromStorage() {
     if (parsed.test_name !== undefined) document.getElementById('varTestName').value = parsed.test_name;
     if (parsed.semester !== undefined) document.getElementById('varSemester').value = parsed.semester;
     if (parsed.batch_name !== undefined) document.getElementById('varBatch').value = parsed.batch_name;
-    if (parsed.section !== undefined) document.getElementById('varSection').value = parsed.section;
     if (parsed.template !== undefined) document.getElementById('varTemplate').value = parsed.template;
+    if (Array.isArray(parsed.parse_fields)) {
+      parseFields = parsed.parse_fields;
+      renderParseFieldList();
+    }
   } catch (e) {
     // Ignore malformed local storage payloads.
   }
 }
 
 function bindCommonVarsAutoSave() {
-  ['varTestName', 'varSemester', 'varBatch', 'varSection', 'varTemplate'].forEach((id) => {
+  ['varTestName', 'varSemester', 'varBatch', 'varTemplate'].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener('input', saveCommonVarsToStorage);
@@ -170,11 +178,57 @@ function applyTemplate(template, vars) {
     .replaceAll('{semester}', vars.semester)
     .replaceAll('{department}', vars.department)
     .replaceAll('{batch_name}', vars.batch_name)
-    .replaceAll('{section}', vars.section)
     .replaceAll('{student_name}', vars.student_name)
     .replaceAll('{reg_no}', vars.reg_no)
     .replaceAll('{subjects_table}', vars.subjects_table)
     .replaceAll('{counselor_name}', '{{ current_user_name or "Counselor" }}');
+}
+
+function initParseFieldsFromMarks(marks) {
+  if (!marks || typeof marks !== 'object') return;
+  if (parseFields.length) return;
+  parseFields = Object.keys(marks)
+    .filter((k) => shouldIncludeMarkEntry(k, marks[k]))
+    .map((k) => ({ key: k, enabled: true }));
+  renderParseFieldList();
+}
+
+function moveParseField(index, direction) {
+  const swap = index + direction;
+  if (swap < 0 || swap >= parseFields.length) return;
+  const temp = parseFields[index];
+  parseFields[index] = parseFields[swap];
+  parseFields[swap] = temp;
+  renderParseFieldList();
+  saveCommonVarsToStorage();
+}
+
+function toggleParseField(index) {
+  if (!parseFields[index]) return;
+  parseFields[index].enabled = !parseFields[index].enabled;
+  renderParseFieldList();
+  saveCommonVarsToStorage();
+}
+
+function renderParseFieldList() {
+  const host = document.getElementById('parseFieldList');
+  if (!host) return;
+  if (!parseFields.length) {
+    host.innerHTML = '<div style="padding:8px;color:var(--text-dim);font-size:.82rem;">Open a student preview to load available fields.</div>';
+    return;
+  }
+  host.innerHTML = parseFields.map((f, idx) => `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px;border-bottom:1px solid var(--border-light);">
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+        <input type="checkbox" ${f.enabled ? 'checked' : ''} onclick="toggleParseField(${idx})">
+        <span>${f.key}</span>
+      </label>
+      <div class="btn-group">
+        <button type="button" class="btn btn-outline btn-sm" onclick="moveParseField(${idx}, -1)"><i class="fas fa-arrow-up"></i></button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="moveParseField(${idx}, 1)"><i class="fas fa-arrow-down"></i></button>
+      </div>
+    </div>
+  `).join('');
 }
 
 function normalizeMetricKey(key) {
@@ -228,6 +282,17 @@ function buildSubjectsTable(marks) {
     subjects.push([String(rawKey).trim(), value]);
   });
 
+  if (parseFields.length) {
+    const enabledOrder = parseFields.filter((f) => f.enabled).map((f) => f.key);
+    const picked = [];
+    enabledOrder.forEach((keyName) => {
+      const found = subjects.find(([k]) => String(k) === String(keyName));
+      if (found) picked.push(found);
+    });
+    subjects.length = 0;
+    picked.forEach((x) => subjects.push(x));
+  }
+
   const lines = [];
   if (attendance) {
     lines.push(`Attendance :\t${attendance}`);
@@ -250,11 +315,11 @@ function openSendPreview(btn) {
   } catch (e) {
     marks = {};
   }
+  initParseFieldsFromMarks(marks || {});
 
   const testName = document.getElementById('varTestName').value || '';
   const semester = document.getElementById('varSemester').value || '';
   const batch = document.getElementById('varBatch').value || '';
-  const section = document.getElementById('varSection').value || '';
   const template = document.getElementById('varTemplate').value || '';
 
   const marksLines = buildSubjectsTable(marks || {});
@@ -263,7 +328,6 @@ function openSendPreview(btn) {
     semester: semester,
     department: department || '{{ test_meta.department or "" }}',
     batch_name: batch,
-    section: section,
     student_name: studentName,
     reg_no: regNo,
     subjects_table: marksLines,
@@ -276,7 +340,6 @@ function openSendPreview(btn) {
   document.getElementById('formTestName').value = testName;
   document.getElementById('formSemester').value = semester;
   document.getElementById('formBatchName').value = batch;
-  document.getElementById('formSection').value = section;
   document.getElementById('formDepartment').value = vars.department;
   document.getElementById('formTemplate').value = template;
 

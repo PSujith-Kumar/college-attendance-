@@ -16,9 +16,10 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 def get_conn():
     """Get a database connection with row_factory."""
-    conn = sqlite3.connect(DATABASE_FILE)
+    conn = sqlite3.connect(DATABASE_FILE, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
@@ -33,6 +34,7 @@ def hash_password(password: str) -> str:
 def init_database():
     """Create all tables and seed defaults."""
     conn = get_conn()
+    conn.execute("PRAGMA journal_mode = WAL")
     c = conn.cursor()
 
     c.execute('''CREATE TABLE IF NOT EXISTS departments (
@@ -49,6 +51,7 @@ def init_database():
         password_hash TEXT NOT NULL,
         name TEXT NOT NULL,
         department TEXT,
+        year_level INTEGER DEFAULT 1,
         role TEXT DEFAULT 'counselor',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         last_login TIMESTAMP,
@@ -59,6 +62,16 @@ def init_database():
         lock_reason TEXT,
         max_students INTEGER DEFAULT 30,
         can_upload_students BOOLEAN DEFAULT 1
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS chief_admin_scopes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chief_admin_email TEXT NOT NULL,
+        department TEXT NOT NULL,
+        year_level INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (chief_admin_email) REFERENCES users(email),
+        UNIQUE(chief_admin_email, department, year_level)
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS active_sessions (
@@ -141,6 +154,7 @@ def init_database():
         test_id INTEGER UNIQUE NOT NULL,
         batch_name TEXT,
         semester INTEGER,
+        year_level INTEGER DEFAULT 1,
         test_name TEXT,
         department TEXT,
         section TEXT,
@@ -167,6 +181,19 @@ def init_database():
         uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (test_id) REFERENCES tests(id),
         UNIQUE(test_id, reg_no, subject_name)
+    )''')
+
+    c.execute('''CREATE TABLE IF NOT EXISTS counselor_mark_overrides (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        counselor_email TEXT NOT NULL,
+        test_id INTEGER NOT NULL,
+        reg_no TEXT NOT NULL,
+        subject_name TEXT NOT NULL,
+        marks TEXT,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (counselor_email) REFERENCES users(email),
+        FOREIGN KEY (test_id) REFERENCES tests(id),
+        UNIQUE(counselor_email, test_id, reg_no, subject_name)
     )''')
 
     c.execute('''CREATE TABLE IF NOT EXISTS password_reset_tokens (
@@ -224,7 +251,10 @@ def init_database():
     # Run migrations for existing DBs
     ensure_sent_messages_test_id_column()
     ensure_can_upload_students_column()
+    ensure_users_year_level_column()
     ensure_test_metadata_columns()
+    ensure_chief_admin_scopes_table()
+    ensure_counselor_mark_overrides_table()
     return True
 
 
@@ -281,13 +311,95 @@ def get_all_users():
     return [dict(r) for r in rows]
 
 
-def create_user(email, password, name, role="counselor", department=None, max_students=30, can_upload_students=True):
+def is_system_admin(role):
+    return str(role or "").strip().lower() == "admin"
+
+
+def is_chief_admin(role):
+    return str(role or "").strip().lower() == "chief_admin"
+
+
+def get_chief_admin_scopes(chief_admin_email):
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT department, year_level
+        FROM chief_admin_scopes
+        WHERE chief_admin_email=?
+        ORDER BY department, year_level
+        """,
+        (chief_admin_email,),
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def set_chief_admin_scopes(chief_admin_email, scopes):
+    """scopes: iterable of (department, year_level)."""
+    cleaned = []
+    for item in scopes or []:
+        if not item:
+            continue
+        dep = str(item[0] or "").strip().upper()
+        try:
+            yr = int(item[1])
+        except (TypeError, ValueError):
+            continue
+        if not dep or yr not in (1, 2, 3, 4):
+            continue
+        cleaned.append((dep, yr))
+
+    conn = get_conn()
+    conn.execute("DELETE FROM chief_admin_scopes WHERE chief_admin_email=?", (chief_admin_email,))
+    for dep, yr in sorted(set(cleaned)):
+        conn.execute(
+            "INSERT OR IGNORE INTO chief_admin_scopes (chief_admin_email, department, year_level) VALUES (?,?,?)",
+            (chief_admin_email, dep, yr),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_scoped_users_for_admin(actor_email, actor_role):
+    """System admin sees all users; chief admin sees counselors in allowed dept/year plus self."""
+    if is_system_admin(actor_role):
+        return get_all_users()
+
+    if not is_chief_admin(actor_role):
+        return []
+
+    scopes = get_chief_admin_scopes(actor_email)
+    if not scopes:
+        own = get_user(actor_email)
+        return [own] if own else []
+
+    allowed = {(s["department"], int(s["year_level"])) for s in scopes}
+    conn = get_conn()
+    rows = conn.execute("SELECT * FROM users ORDER BY created_at DESC").fetchall()
+    conn.close()
+
+    filtered = []
+    for r in rows:
+        d = dict(r)
+        if d.get("email") == actor_email:
+            filtered.append(d)
+            continue
+        if d.get("role") != "counselor":
+            continue
+        key = (str(d.get("department") or "").strip().upper(), int(d.get("year_level") or 1))
+        if key in allowed:
+            filtered.append(d)
+    return filtered
+
+
+def create_user(email, password, name, role="counselor", department=None, max_students=30,
+                can_upload_students=True, year_level=1):
     conn = get_conn()
     try:
-        conn.execute("""INSERT INTO users (email, password_hash, name, role, department, max_students, can_upload_students)
-                        VALUES (?,?,?,?,?,?,?)""",
-                     (email, hash_password(password), name, role, department, max_students,
-                      1 if can_upload_students else 0))
+        conn.execute("""INSERT INTO users (email, password_hash, name, role, department, year_level, max_students, can_upload_students)
+                        VALUES (?,?,?,?,?,?,?,?)""",
+                            (email, hash_password(password), name, role, department, int(year_level or 1),
+                             max_students, 1 if can_upload_students else 0))
         conn.commit()
         return True, "User created"
     except sqlite3.IntegrityError:
@@ -336,6 +448,14 @@ def lock_user(email, reason="Locked by admin"):
 def unlock_user(email):
     conn = get_conn()
     conn.execute("UPDATE users SET is_locked=0, lock_reason=NULL WHERE email=?", (email,))
+    conn.commit()
+    conn.close()
+
+
+def update_user_password(email, password_hash):
+    """Update user password hash."""
+    conn = get_conn()
+    conn.execute("UPDATE users SET password_hash=? WHERE email=?", (password_hash, email))
     conn.commit()
     conn.close()
 
@@ -550,17 +670,21 @@ def register_session(session_id, user_email, ip_address=None, user_agent=None, f
 
 def update_session_activity(session_id):
     conn = get_conn()
-    row = conn.execute("""SELECT s.is_active, u.is_active as ua, u.is_locked
+    try:
+        row = conn.execute("""SELECT s.is_active, u.is_active as ua, u.is_locked
                           FROM active_sessions s JOIN users u ON s.user_email=u.email
                           WHERE s.session_id=?""", (session_id,)).fetchone()
-    if not row or not row["is_active"] or not row["ua"] or row["is_locked"]:
-        conn.close()
+        if not row or not row["is_active"] or not row["ua"] or row["is_locked"]:
+            return False
+        conn.execute("UPDATE active_sessions SET last_activity=? WHERE session_id=? AND is_active=1",
+                     (datetime.now(), session_id))
+        conn.commit()
+        return True
+    except sqlite3.OperationalError:
+        # Do not fail request cycle when heartbeat write loses a lock race.
         return False
-    conn.execute("UPDATE active_sessions SET last_activity=? WHERE session_id=? AND is_active=1",
-                 (datetime.now(), session_id))
-    conn.commit()
-    conn.close()
-    return True
+    finally:
+        conn.close()
 
 
 def end_session(session_id, reason="user_logout"):
@@ -882,13 +1006,14 @@ def get_counselor_submissions(counselor_email, limit=50):
     return result
 
 
-def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=None, filter_counselor=None):
+def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=None,
+                         filter_counselor=None, filter_year_level=None, allowed_scopes=None):
     """Get unique uploaded tests, keeping latest per logical test key."""
     conn = get_conn()
     rows = conn.execute("""
         SELECT t.id, t.test_name as t_name, t.test_date,
                tm.id as tm_id, tm.test_id, tm.test_name, tm.batch_name, tm.semester,
-             tm.department, tm.section, tm.uploaded_at, tm.uploaded_by, tm.subjects,
+                         tm.department, tm.section, tm.year_level, tm.uploaded_at, tm.uploaded_by, tm.subjects,
                u.name as uploaded_by_name,
                (SELECT COUNT(DISTINCT sm.reg_no) FROM student_marks sm WHERE sm.test_id = t.id) as student_count,
                0 as is_duplicate
@@ -910,6 +1035,7 @@ def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=No
         sem_val = str(d.get("semester") or "")
         dept_val = str(d.get("department") or "")
         section_val = str(d.get("section") or "")
+        year_val = str(d.get("year_level") or "")
         counselor_val = str(d.get("uploaded_by") or "")
         if filter_batch and batch_val != str(filter_batch):
             continue
@@ -919,6 +1045,12 @@ def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=No
             continue
         if filter_counselor and counselor_val != str(filter_counselor):
             continue
+        if filter_year_level and year_val != str(filter_year_level):
+            continue
+        if allowed_scopes:
+            scope_key = (dept_val.strip().upper(), int(d.get("year_level") or 1))
+            if scope_key not in allowed_scopes:
+                continue
 
         try:
             d["subjects"] = json.loads(d.get("subjects") or "[]")
@@ -933,12 +1065,13 @@ def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=No
             batch_val.strip().lower(),
             sem_val.strip().lower(),
             dept_val.strip().lower(),
+            year_val.strip().lower(),
             section_val.strip().lower(),
         )
 
         # If no metadata fields exist, use concrete test id to avoid collapsing unrelated rows.
         if not any(key):
-            key = (f"id:{d.get('id')}", "", "", "", "")
+            key = (f"id:{d.get('id')}", "", "", "", "", "")
 
         if key in seen:
             continue
@@ -961,6 +1094,41 @@ def get_departments(active_only=True):
         rows = conn.execute("SELECT * FROM departments ORDER BY name").fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_departments_for_admin(actor_email, actor_role, active_only=False):
+    if is_system_admin(actor_role):
+        return get_departments(active_only=active_only)
+    if not is_chief_admin(actor_role):
+        return []
+
+    scopes = get_chief_admin_scopes(actor_email)
+    allowed_depts = sorted({(s.get("department") or "").strip().upper() for s in scopes if s.get("department")})
+    if not allowed_depts:
+        return []
+
+    conn = get_conn()
+    placeholders = ",".join(["?"] * len(allowed_depts))
+    sql = f"SELECT * FROM departments WHERE UPPER(code) IN ({placeholders})"
+    params = list(allowed_depts)
+    if active_only:
+        sql += " AND is_active=1"
+    sql += " ORDER BY name"
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def is_department_active(department_code):
+    dep = str(department_code or "").strip().upper()
+    if not dep:
+        return True
+    conn = get_conn()
+    row = conn.execute("SELECT is_active FROM departments WHERE UPPER(code)=?", (dep,)).fetchone()
+    conn.close()
+    if not row:
+        return True
+    return bool(row["is_active"])
 
 
 def create_department(code, name, color="#667eea"):
@@ -1269,10 +1437,10 @@ def get_tests():
 def save_test_metadata(test_id, metadata: dict):
     conn = get_conn()
     conn.execute("""INSERT OR REPLACE INTO test_metadata
-                                        (test_id, batch_name, semester, test_name, department, section, file_hash, academic_year,
+                                        (test_id, batch_name, semester, year_level, test_name, department, section, file_hash, academic_year,
                      subjects, subject_columns, header_row, data_start_row, uploaded_at, uploaded_by)
-                                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                 (test_id, metadata.get("batch_name"), metadata.get("semester"),
+                                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 (test_id, metadata.get("batch_name"), metadata.get("semester"), metadata.get("year_level", 1),
                   metadata.get("test_name"), metadata.get("department"),
                                     metadata.get("section"), metadata.get("file_hash"),
                   metadata.get("academic_year"), json.dumps(metadata.get("subjects", [])),
@@ -1322,6 +1490,24 @@ def get_student_marks_for_reg(test_id, reg_no):
     return {r["subject_name"]: r["marks"] for r in rows}
 
 
+def get_student_marks_for_reg_for_counselor(test_id, reg_no, counselor_email):
+    base = get_student_marks_for_reg(test_id, reg_no)
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT subject_name, marks
+        FROM counselor_mark_overrides
+        WHERE counselor_email=? AND test_id=? AND reg_no=?
+        """,
+        (counselor_email, test_id, reg_no),
+    ).fetchall()
+    conn.close()
+    merged = dict(base)
+    for r in rows:
+        merged[r["subject_name"]] = r["marks"]
+    return merged
+
+
 def get_test_marks_grouped(test_id):
     """Get test marks grouped by student with all subjects in columns."""
     conn = get_conn()
@@ -1338,15 +1524,26 @@ def get_test_marks_grouped(test_id):
     conn.close()
     
     subjects = []
+
+    def _is_named_subject(name):
+        txt = str(name or "").strip()
+        if not txt:
+            return False
+        low = txt.lower()
+        if low.startswith("unnamed"):
+            return False
+        if re.match(r"^subject[_\s-]*\d+$", low):
+            return False
+        return True
     if meta and meta["subjects"]:
         try:
-            subjects = json.loads(meta["subjects"])
+            subjects = [s for s in json.loads(meta["subjects"]) if _is_named_subject(s)]
         except:
             pass
     
     # If no subjects in metadata, extract from marks
     if not subjects:
-        subjects = list(set(r["subject_name"] for r in rows if r["subject_name"]))
+        subjects = list(set(r["subject_name"] for r in rows if _is_named_subject(r["subject_name"])))
         subjects.sort()
     
     # Group by student
@@ -1365,6 +1562,56 @@ def get_test_marks_grouped(test_id):
         "subjects": subjects,
         "students": list(students.values())
     }
+
+
+def get_test_marks_grouped_for_counselor(test_id, counselor_email):
+    grouped = get_test_marks_grouped(test_id)
+    conn = get_conn()
+    rows = conn.execute(
+        """
+        SELECT reg_no, subject_name, marks
+        FROM counselor_mark_overrides
+        WHERE counselor_email=? AND test_id=?
+        """,
+        (counselor_email, test_id),
+    ).fetchall()
+    conn.close()
+
+    if not rows:
+        return grouped
+
+    by_key = {(str(s.get("reg_no") or ""), str(subj)): str(mark)
+              for s in grouped.get("students", [])
+              for subj, mark in (s.get("marks") or {}).items()}
+    for r in rows:
+        by_key[(str(r["reg_no"]), str(r["subject_name"]))] = str(r["marks"] or "")
+
+    for student in grouped.get("students", []):
+        reg_no = str(student.get("reg_no") or "")
+        marks = student.get("marks") or {}
+        for subj in list(marks.keys()):
+            key = (reg_no, str(subj))
+            if key in by_key:
+                marks[subj] = by_key[key]
+        student["marks"] = marks
+
+    return grouped
+
+
+def upsert_counselor_mark_override(counselor_email, test_id, reg_no, subject_name, marks):
+    conn = get_conn()
+    conn.execute(
+        """
+        INSERT INTO counselor_mark_overrides
+            (counselor_email, test_id, reg_no, subject_name, marks, updated_at)
+        VALUES (?,?,?,?,?,CURRENT_TIMESTAMP)
+        ON CONFLICT(counselor_email, test_id, reg_no, subject_name)
+        DO UPDATE SET marks=excluded.marks, updated_at=CURRENT_TIMESTAMP
+        """,
+        (counselor_email, test_id, reg_no, subject_name, str(marks or "")),
+    )
+    conn.commit()
+    conn.close()
 
 
 # =========================================================================
@@ -1403,7 +1650,9 @@ def get_message_history(counselor_email=None, limit=100):
     return [dict(r) for r in rows]
 
 
-def get_message_history_filtered(day=None, counselor_query=None, limit=500):
+def get_message_history_filtered(day=None, counselor_query=None, limit=500,
+                                filter_year=None, filter_month=None, filter_day=None,
+                                allowed_counselors=None):
     """Admin-facing message history with optional day and counselor-name filters."""
     conn = get_conn()
     where = []
@@ -1412,11 +1661,30 @@ def get_message_history_filtered(day=None, counselor_query=None, limit=500):
     if day:
         where.append("DATE(sm.sent_at)=?")
         params.append(str(day))
+    else:
+        if filter_year:
+            where.append("strftime('%Y', sm.sent_at)=?")
+            params.append(str(filter_year).zfill(4))
+        if filter_month:
+            where.append("strftime('%m', sm.sent_at)=?")
+            params.append(str(filter_month).zfill(2))
+        if filter_day:
+            where.append("strftime('%d', sm.sent_at)=?")
+            params.append(str(filter_day).zfill(2))
 
     if counselor_query:
         q = f"%{str(counselor_query).strip().lower()}%"
         where.append("(LOWER(COALESCE(u.name, '')) LIKE ? OR LOWER(COALESCE(sm.counselor_email, '')) LIKE ?)")
         params.extend([q, q])
+
+    if allowed_counselors is not None:
+        allowed = [str(x).strip().lower() for x in allowed_counselors if str(x).strip()]
+        if not allowed:
+            conn.close()
+            return []
+        placeholders = ",".join(["?"] * len(allowed))
+        where.append(f"LOWER(COALESCE(sm.counselor_email, '')) IN ({placeholders})")
+        params.extend(allowed)
 
     where_sql = f"WHERE {' AND '.join(where)}" if where else ""
     limit_sql = ""
@@ -1459,6 +1727,42 @@ def get_message_days(counselor_query=None):
         {where}
         GROUP BY DATE(sm.sent_at)
         ORDER BY day DESC
+        """,
+        params,
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def get_message_counselor_suggestions(query="", allowed_counselors=None, limit=25):
+    conn = get_conn()
+    where = ["u.role='counselor'"]
+    params = []
+
+    q = str(query or "").strip().lower()
+    if q:
+        like_q = f"%{q}%"
+        where.append("(LOWER(COALESCE(u.name, '')) LIKE ? OR LOWER(COALESCE(u.email, '')) LIKE ?)")
+        params.extend([like_q, like_q])
+
+    if allowed_counselors is not None:
+        allowed = [str(x).strip().lower() for x in allowed_counselors if str(x).strip()]
+        if not allowed:
+            conn.close()
+            return []
+        placeholders = ",".join(["?"] * len(allowed))
+        where.append(f"LOWER(u.email) IN ({placeholders})")
+        params.extend(allowed)
+
+    where_sql = " AND ".join(where)
+    params.append(int(limit))
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT u.name, u.email
+        FROM users u
+        WHERE {where_sql}
+        ORDER BY u.name
+        LIMIT ?
         """,
         params,
     ).fetchall()
@@ -1557,7 +1861,10 @@ def validate_session(session_id):
 
 def touch_session(session_id):
     """Alias for update_session_activity."""
-    update_session_activity(session_id)
+    try:
+        update_session_activity(session_id)
+    except Exception:
+        return False
 
 
 def get_students_by_counselor(counselor_email):
@@ -1576,37 +1883,8 @@ def get_students_by_counselor(counselor_email):
 
 
 def get_tests_by_counselor(counselor_email):
-    """Get department-visible tests that contain marks for this counselor's assigned students."""
-    conn = get_conn()
-    rows = conn.execute("""
-        SELECT DISTINCT t.id,
-               COALESCE(tm.test_name, t.test_name) as test_name,
-               COALESCE(tm.semester, '') as semester,
-               COALESCE(tm.department, '') as department,
-               COALESCE(tm.batch_name, '') as batch_name,
-               COALESCE(tm.section, '') as section,
-               tm.uploaded_at
-               ,(SELECT COUNT(DISTINCT sm.reg_no)
-                   FROM student_marks sm
-                   JOIN counselor_students cs ON cs.reg_no = sm.reg_no
-                   WHERE sm.test_id = t.id AND cs.counselor_email = ?) as student_count
-               ,(SELECT COUNT(DISTINCT s2.reg_no)
-                   FROM sent_messages s2
-                   WHERE s2.test_id = t.id AND s2.counselor_email = ?) as generated_count
-        FROM tests t
-        JOIN test_metadata tm ON t.id = tm.test_id
-        JOIN users u ON u.email = ?
-        WHERE COALESCE(tm.department, '') = COALESCE(u.department, '')
-          AND EXISTS (
-              SELECT 1
-              FROM student_marks sm
-              JOIN counselor_students cs ON cs.reg_no = sm.reg_no
-              WHERE sm.test_id = t.id AND cs.counselor_email = ?
-          )
-        ORDER BY tm.uploaded_at DESC, t.id DESC
-        """, (counselor_email, counselor_email, counselor_email, counselor_email)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    """Backward-compatible alias for counselor visible test database."""
+    return get_visible_tests_for_counselor(counselor_email)
 
 
 def get_marks_by_test(test_id):
@@ -1640,7 +1918,7 @@ def find_test_by_hash(file_hash, uploaded_by=None):
 
 
 def get_visible_tests_for_counselor(counselor_email):
-    """Return department-visible tests that contain marks for allocated students."""
+    """Return department+year-visible tests that contain marks for allocated students."""
     conn = get_conn()
     rows = conn.execute(
         """
@@ -1648,6 +1926,7 @@ def get_visible_tests_for_counselor(counselor_email):
                COALESCE(tm.test_name, t.test_name) AS test_name,
                COALESCE(tm.semester, '') AS semester,
                COALESCE(tm.department, '') AS department,
+               COALESCE(tm.year_level, 1) AS year_level,
                COALESCE(tm.batch_name, '') AS batch_name,
                COALESCE(tm.section, '') AS section,
                tm.uploaded_at,
@@ -1662,6 +1941,7 @@ def get_visible_tests_for_counselor(counselor_email):
         JOIN test_metadata tm ON t.id = tm.test_id
         JOIN users u ON u.email = ?
         WHERE COALESCE(tm.department, '') = COALESCE(u.department, '')
+                    AND COALESCE(tm.year_level, 1) = COALESCE(u.year_level, 1)
           AND EXISTS (
               SELECT 1
               FROM student_marks sm
@@ -1696,37 +1976,63 @@ def find_existing_department_test(department, semester, test_name, batch_name=No
     return dict(row) if row else None
 
 
+def find_existing_department_year_test(department, year_level, semester, test_name, batch_name=None):
+    """Find latest existing test for the same department+year+semester+test tuple."""
+    conn = get_conn()
+    row = conn.execute(
+        """
+        SELECT tm.test_id, tm.file_hash, tm.uploaded_by, tm.uploaded_at
+        FROM test_metadata tm
+        WHERE LOWER(COALESCE(tm.department, '')) = LOWER(COALESCE(?, ''))
+          AND COALESCE(tm.year_level, 1) = COALESCE(?, 1)
+          AND LOWER(COALESCE(tm.semester, '')) = LOWER(COALESCE(?, ''))
+          AND LOWER(COALESCE(tm.test_name, '')) = LOWER(COALESCE(?, ''))
+          AND LOWER(COALESCE(tm.batch_name, '')) = LOWER(COALESCE(?, ''))
+        ORDER BY tm.uploaded_at DESC, tm.test_id DESC
+        LIMIT 1
+        """,
+        (department, int(year_level or 1), str(semester), test_name, batch_name or ""),
+    ).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
 def save_test_marks(test_name, semester, counselor_email, students, subjects,
                     batch_name=None, department=None, section=None,
-                    file_hash=None, replace_test_id=None, sync_students=True):
+                    file_hash=None, replace_test_id=None, sync_students=True,
+                    year_level=1, enforce_assigned_match=True, uploaded_by=None):
     """
     High-level wrapper to create a test and save marks.
     students: list of dicts with 'reg_no', 'name', 'marks' (dict of subject: mark)
     subjects: list of subject names
     """
-    conn = get_conn()
-    try:
-        # Hard guard: uploaded rows must match assigned counselor students by Reg No + Name.
-        def _norm_reg(value):
-            reg = str(value or "").strip().replace(" ", "")
-            if reg.endswith(".0"):
-                reg = reg[:-2]
-            return reg.upper()
+    # Hard guard: uploaded rows must match assigned counselor students by Reg No + Name.
+    def _norm_reg(value):
+        reg = str(value or "").strip().replace(" ", "")
+        if reg.endswith(".0"):
+            reg = reg[:-2]
+        return reg.upper()
 
-        def _norm_name(value):
-            name = str(value or "").strip().lower()
-            name = re.sub(r"\s+", " ", name)
-            return name
+    def _norm_name(value):
+        name = str(value or "").strip().lower()
+        name = re.sub(r"\s+", " ", name)
+        return name
 
-        assigned_rows = conn.execute(
-            "SELECT reg_no, student_name FROM counselor_students WHERE counselor_email=?",
-            (counselor_email,),
-        ).fetchall()
-        assigned_map = {
-            _norm_reg(r["reg_no"]): _norm_name(r["student_name"])
-            for r in assigned_rows
-            if _norm_reg(r["reg_no"])
-        }
+    if enforce_assigned_match:
+        # Validate students against assigned list (separate connection, short-lived)
+        conn = get_conn()
+        try:
+            assigned_rows = conn.execute(
+                "SELECT reg_no, student_name FROM counselor_students WHERE counselor_email=?",
+                (counselor_email,),
+            ).fetchall()
+            assigned_map = {
+                _norm_reg(r["reg_no"]): _norm_name(r["student_name"])
+                for r in assigned_rows
+                if _norm_reg(r["reg_no"])
+            }
+        finally:
+            conn.close()
 
         if not assigned_map:
             return False, "No match: no students assigned to this counselor."
@@ -1743,6 +2049,7 @@ def save_test_marks(test_name, semester, counselor_email, students, subjects,
         if mismatch_samples:
             return False, f"No match: uploaded rows do not match assigned list (Reg No + Name). Examples: {', '.join(mismatch_samples)}"
 
+    try:
         # Get or create batch/semester
         yr = datetime.now().year
         default_batch_name = f"{yr}-{str(yr + 1)[-2:]}"
@@ -1759,9 +2066,15 @@ def save_test_marks(test_name, semester, counselor_email, students, subjects,
         # Create test or replace existing test content
         if replace_test_id:
             test_id = int(replace_test_id)
-            conn.execute("DELETE FROM student_marks WHERE test_id=?", (test_id,))
-            conn.execute("DELETE FROM test_metadata WHERE test_id=?", (test_id,))
-            conn.execute("UPDATE tests SET semester_id=?, test_name=? WHERE id=?", (semester_id, test_name, test_id))
+            # Use separate connection for deletion/update operations
+            conn2 = get_conn()
+            try:
+                conn2.execute("DELETE FROM student_marks WHERE test_id=?", (test_id,))
+                conn2.execute("DELETE FROM test_metadata WHERE test_id=?", (test_id,))
+                conn2.execute("UPDATE tests SET semester_id=?, test_name=? WHERE id=?", (semester_id, test_name, test_id))
+                conn2.commit()
+            finally:
+                conn2.close()
         else:
             test_id = create_test(semester_id, test_name)
 
@@ -1774,12 +2087,13 @@ def save_test_marks(test_name, semester, counselor_email, students, subjects,
         save_test_metadata(test_id, {
             "batch_name": chosen_batch_name,
             "semester": semester,
+            "year_level": int(year_level or 1),
             "test_name": test_name,
             "department": department,
             "section": section,
             "file_hash": file_hash,
             "subjects": subjects,
-            "uploaded_by": counselor_email,
+            "uploaded_by": uploaded_by or counselor_email,
         })
 
         # Optionally sync roster/contact details from marksheet.
@@ -1818,8 +2132,6 @@ def save_test_marks(test_name, semester, counselor_email, students, subjects,
         return True, f"Saved marks for {len(students)} students"
     except Exception as e:
         return False, str(e)
-    finally:
-        conn.close()
 
 
 def get_format_settings_list(active_only=False):
@@ -1908,11 +2220,23 @@ def get_counselor_activity_summary():
             (email,)
         ).fetchone()[0]
 
-        # Tests uploaded (via test_metadata.uploaded_by)
+        # Tests visible for counselor (department + year with allocated students)
         tests_uploaded = conn.execute(
-            "SELECT COUNT(DISTINCT tm.test_id) FROM test_metadata tm WHERE tm.uploaded_by=?", (email,)
+            """
+            SELECT COUNT(DISTINCT tm.test_id)
+            FROM test_metadata tm
+            JOIN users u ON u.email=?
+            WHERE COALESCE(tm.department, '') = COALESCE(u.department, '')
+              AND COALESCE(tm.year_level, 1) = COALESCE(u.year_level, 1)
+              AND EXISTS (
+                    SELECT 1
+                    FROM student_marks sm
+                    JOIN counselor_students cs ON cs.reg_no = sm.reg_no
+                    WHERE sm.test_id = tm.test_id AND cs.counselor_email = ?
+              )
+            """,
+            (email, email),
         ).fetchone()[0]
-
         # Total messages sent
         total_messages = conn.execute(
             "SELECT COUNT(*) FROM sent_messages WHERE counselor_email=?", (email,)
@@ -2075,6 +2399,68 @@ def ensure_test_metadata_columns():
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE test_metadata ADD COLUMN file_hash TEXT")
         conn.commit()
+
+    try:
+        conn.execute("SELECT year_level FROM test_metadata LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE test_metadata ADD COLUMN year_level INTEGER DEFAULT 1")
+        conn.execute("UPDATE test_metadata SET year_level=1 WHERE year_level IS NULL")
+        conn.commit()
+    conn.close()
+
+
+def ensure_users_year_level_column():
+    """Add year_level to users if missing and backfill existing users."""
+    conn = get_conn()
+    try:
+        conn.execute("SELECT year_level FROM users LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE users ADD COLUMN year_level INTEGER DEFAULT 1")
+        conn.commit()
+
+    conn.execute("UPDATE users SET year_level=1 WHERE year_level IS NULL OR year_level < 1")
+    conn.commit()
+    conn.close()
+
+
+def ensure_chief_admin_scopes_table():
+    conn = get_conn()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chief_admin_scopes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chief_admin_email TEXT NOT NULL,
+            department TEXT NOT NULL,
+            year_level INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (chief_admin_email) REFERENCES users(email),
+            UNIQUE(chief_admin_email, department, year_level)
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def ensure_counselor_mark_overrides_table():
+    conn = get_conn()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS counselor_mark_overrides (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            counselor_email TEXT NOT NULL,
+            test_id INTEGER NOT NULL,
+            reg_no TEXT NOT NULL,
+            subject_name TEXT NOT NULL,
+            marks TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (counselor_email) REFERENCES users(email),
+            FOREIGN KEY (test_id) REFERENCES tests(id),
+            UNIQUE(counselor_email, test_id, reg_no, subject_name)
+        )
+        """
+    )
+    conn.commit()
     conn.close()
 
 

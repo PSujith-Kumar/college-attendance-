@@ -28,9 +28,14 @@
 </div>
 
 {% set current_tab = request.args.get('tab', 'users') %}
+<div id="adminScriptData"
+  data-current-tab="{{ request.args.get('tab', 'users') }}"
+  data-reset-users='{{ users|tojson|forceescape }}'
+  style="display:none;"></div>
 
 <!-- ==================== USERS TAB ==================== -->
 <div class="tab-panel {% if current_tab == 'users' %}active{% endif %}" id="tab-users">
+  {% if current_tab == 'users' %}
   <!-- Create User -->
   <div class="card mb-3">
     <div class="card-title"><i class="fas fa-user-plus"></i> Register New User</div>
@@ -70,8 +75,43 @@
           <label class="form-label">Role</label>
           <select class="form-control" name="role" id="createUserRole" onchange="toggleCreateUserFields()">
             <option value="counselor">Counselor</option>
-            <option value="admin">Admin</option>
+            <option value="chief_admin">Chief Admin</option>
+            {% if is_system_admin %}
+            <option value="admin">System Admin</option>
+            {% endif %}
           </select>
+        </div>
+      </div>
+      <div class="form-group" id="createUserChiefScopeWrap" style="display:none;">
+        <label class="form-label">Allocate Department/Year Access</label>
+        <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;margin-bottom:12px;">
+          <div class="form-row" style="margin-bottom:12px;">
+            <div class="form-group" style="margin:0;">
+              <label class="form-label">Select Department</label>
+              <input class="form-control" id="chiefDeptSelect" list="chiefDeptSuggestions" placeholder="Search and select department" oninput="updateChiefYearOptions()">
+              <datalist id="chiefDeptSuggestions">
+                {% for d in departments if d.is_active %}
+                <option value="{{ d.code }}" label="{{ d.name }}"></option>
+                {% endfor %}
+              </datalist>
+            </div>
+            <div class="form-group" style="margin:0;">
+              <label class="form-label">Select Year(s)</label>
+              <div id="chiefYearOptions" style="display:flex;gap:10px;flex-wrap:wrap;padding-top:10px;">
+                <span style="font-size:.82rem;color:var(--text-dim);">Select department first</span>
+              </div>
+            </div>
+          </div>
+          <button type="button" class="btn btn-sm btn-outline" onclick="addChiefScope()" id="addChiefScopeBtn" disabled>
+            <i class="fas fa-plus"></i> Add Selection
+          </button>
+        </div>
+        
+        <!-- Selected Scopes List -->
+        <div id="chiefScopesList" style="display:none;">
+          <label class="form-label">Allocated Departments & Years</label>
+          <div id="selectedChiefScopes" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:8px;">
+          </div>
         </div>
       </div>
       <div class="form-row" id="createUserCounselorRow">
@@ -86,6 +126,17 @@
             {% endfor %}
           </select>
         </div>
+        <div class="form-group">
+          <label class="form-label">Year</label>
+          <select class="form-control" name="year_level" id="createUserYearLevel">
+            <option value="1" selected>1st Year</option>
+            <option value="2">2nd Year</option>
+            <option value="3">3rd Year</option>
+            <option value="4">4th Year</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row" id="createUserCounselorCapacityRow">
         <div class="form-group">
           <label class="form-label">Max Students</label>
           <input type="number" class="form-control" name="max_students" id="createUserMaxStudents" value="30" min="1" max="200">
@@ -111,61 +162,136 @@
 
   <!-- User list -->
   <h3 class="section-title"><i class="fas fa-list"></i> All Users ({{ users|length }})</h3>
-  <div class="user-cards">
-    {% for u in users %}
-    <div class="user-card">
-      <div class="user-card-header">
-        <div class="user-card-avatar">{{ u.name[0]|upper }}</div>
-        <div class="user-card-info">
-          <h3>{{ u.name }}</h3>
-          <p>{{ u.email }}</p>
+  
+  <!-- Global Action Bar -->
+  <div class="card mb-3">
+    <div class="global-action-bar">
+      <div class="form-group" style="flex:1;min-width:260px;">
+        <label class="form-label">Search by Name</label>
+        <div style="position:relative;">
+          <input id="userSearchBox" class="form-control" type="text" placeholder="Type name to search..." oninput="filterUserTable()">
+          <ul id="userSearchSuggestions" class="search-suggestions" style="display:none;"></ul>
         </div>
       </div>
-      <div class="user-card-meta">
-        <span class="badge badge-primary">{{ u.role|title }}</span>
-        {% if u.department %}<span class="badge badge-info">{{ u.department }}</span>{% endif %}
-        {% if u.is_locked %}<span class="badge badge-danger">Locked</span>
-        {% elif u.is_active %}<span class="badge badge-success">Active</span>
-        {% else %}<span class="badge badge-muted">Inactive</span>{% endif %}
-        {% if u.role == 'counselor' %}
-        <span class="badge {% if u.can_upload_students %}badge-success{% else %}badge-warning{% endif %}">
-          {{ 'Can Upload' if u.can_upload_students else 'No Upload' }}
-        </span>
-        {% endif %}
+      <div class="form-group" style="min-width:180px;">
+        <label class="form-label">Sort By</label>
+        <select class="form-control" id="userSortBy" onchange="sortUserTable()">
+          <option value="name_asc">Name A-Z</option>
+          <option value="date_added">Date Added</option>
+        </select>
       </div>
-      {% if u.role != 'admin' or u.email != current_user_email %}
-      <div class="user-card-actions">
-        <button class="btn btn-outline btn-sm" onclick="openModal('edit-{{ loop.index }}')">
-          <i class="fas fa-edit"></i> Edit
+      <div class="form-group" style="min-width:120px;align-self:end;">
+        <button type="button" class="btn btn-outline btn-sm" id="userFilterToggle" onclick="toggleUserFilterTray()">
+          <i class="fas fa-filter"></i> Filters
         </button>
-        {% if u.role == 'counselor' %}
-        <button class="btn btn-outline btn-sm" onclick="openModal('upload-{{ loop.index }}')">
-          <i class="fas fa-upload"></i> Students
-        </button>
-        <button class="btn btn-outline btn-sm" onclick="openModal('manage-students-{{ loop.index }}')">
-          <i class="fas fa-user-pen"></i> Manage
-        </button>
-        {% endif %}
-        {% if u.is_locked %}
-        <form method="POST" action="{{ url_for('api_unlock_user', email=u.email) }}" style="display:inline">
-          <button class="btn btn-success btn-sm"><i class="fas fa-unlock"></i> Unlock</button>
-        </form>
-        {% else %}
-        <form method="POST" action="{{ url_for('api_lock_user', email=u.email) }}" style="display:inline">
-          <button class="btn btn-warning btn-sm"><i class="fas fa-lock"></i> Lock</button>
-        </form>
-        {% endif %}
-        <form method="POST" action="{{ url_for('api_force_logout', email=u.email) }}" style="display:inline">
-          <button class="btn btn-outline btn-sm"><i class="fas fa-sign-out-alt"></i></button>
-        </form>
-        <form method="POST" action="{{ url_for('api_delete_user', email=u.email) }}" style="display:inline"
-              onsubmit="return confirm('Delete {{ u.name }}? This cannot be undone.')">
-          <button class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
-        </form>
       </div>
-      {% endif %}
     </div>
 
+    <div id="userFilterTray" class="filter-tray" style="display:none;">
+      <select class="form-control" id="filterDepartment" onchange="filterUserTable()" style="max-width:180px;">
+        <option value="">All Departments</option>
+        {% for d in departments %}
+        <option value="{{ d.code }}">{{ d.code }}</option>
+        {% endfor %}
+      </select>
+      <select class="form-control" id="filterRole" onchange="filterUserTable()" style="max-width:160px;">
+        <option value="">All Account Types</option>
+        <option value="admin">System Admin</option>
+        <option value="chief_admin">Chief Admin</option>
+        <option value="counselor">Counselor</option>
+      </select>
+      <select class="form-control" id="filterStatus" onchange="filterUserTable()" style="max-width:140px;">
+        <option value="">All States</option>
+        <option value="active">Active</option>
+        <option value="inactive">Inactive</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- User Table -->
+  <div class="table-wrapper">
+    <table id="userTable">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Role</th>
+          <th>Department</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        {% set scope_key = (u.department or '')|upper ~ '::' ~ (u.year_level or 1) %}
+        {% set chief_assignments = chief_scopes_by_email.get(u.email, []) %}
+        {% set chief_departments = [] %}
+        {% if u.role == 'chief_admin' and chief_assignments %}
+          {% for assignment in chief_assignments %}
+            {% set dep_code = (assignment.split('::')[0] if '::' in assignment else assignment)|upper %}
+            {% if dep_code and dep_code not in chief_departments %}
+              {% set _ = chief_departments.append(dep_code) %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {% set can_edit_user = is_system_admin or (is_chief_admin and u.role == 'counselor' and scope_key in chief_scope_keys) %}
+        {% set can_manage_user = (is_system_admin and (u.role != 'admin' or u.email != current_user_email)) or (is_chief_admin and can_edit_user) %}
+        <tr class="user-row" data-user-name="{{ u.name|lower }}" data-user-name-display="{{ u.name }}" data-user-role="{{ u.role or 'counselor' }}" data-user-dept="{{ u.department or '' }}" data-user-status="{% if u.is_active and not u.is_locked %}active{% else %}inactive{% endif %}" data-user-created="{{ u.created_at or '' }}">
+          <td>
+            <strong>{{ u.name }}</strong>
+          </td>
+          <td>
+            <span class="badge {% if u.role == 'admin' %}badge-role-admin{% elif u.role == 'chief_admin' %}badge-role-chief{% else %}badge-role-counselor{% endif %}">
+              {% if u.role == 'admin' %}System Admin{% elif u.role == 'chief_admin' %}Chief Admin{% else %}Counselor{% endif %}
+            </span>
+          </td>
+          <td>
+            {% if u.role == 'chief_admin' %}
+              {% if chief_departments|length == 0 %}
+                —
+              {% elif chief_departments|length <= 2 %}
+                {{ chief_departments|join(', ') }}
+              {% else %}
+                Multiple
+              {% endif %}
+            {% else %}
+              {{ u.department or '—' }}
+            {% endif %}
+          </td>
+          <td>
+            {% if u.is_active and not u.is_locked %}<span class="badge badge-success">Active</span>
+            {% else %}<span class="badge badge-danger">Inactive</span>{% endif %}
+          </td>
+          <td style="text-align:right;">
+            <div class="btn-group" style="justify-content:flex-end;">
+              {% if can_edit_user %}
+              <button class="btn btn-outline btn-sm" onclick="openModal('edit-{{ loop.index }}')" title="Edit Registration Fields">
+                <i class="fas fa-edit"></i> Edit
+              </button>
+              {% else %}
+              <button class="btn btn-outline btn-sm" title="Edit disabled by role scope" disabled>
+                <i class="fas fa-edit"></i> Edit
+              </button>
+              {% endif %}
+              {% if can_manage_user %}
+              {% if u.is_locked %}
+              <form method="POST" action="{{ url_for('api_unlock_user', email=u.email) }}" style="display:inline">
+                <button class="btn btn-success btn-sm" title="Unlock User"><i class="fas fa-unlock"></i></button>
+              </form>
+              {% else %}
+              <form method="POST" action="{{ url_for('api_lock_user', email=u.email) }}" style="display:inline">
+                <button class="btn btn-warning btn-sm" title="Lock User"><i class="fas fa-lock"></i></button>
+              </form>
+              {% endif %}
+              <form method="POST" action="{{ url_for('api_delete_user', email=u.email) }}" style="display:inline" onsubmit="return confirm('Delete {{ u.name }}? This cannot be undone.')">
+                <button class="btn btn-danger btn-sm" title="Delete User"><i class="fas fa-trash"></i></button>
+              </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+
+        <tr aria-hidden="true" style="height:0;line-height:0;">
+          <td colspan="5" style="padding:0;border:none;height:0;line-height:0;font-size:0;overflow:hidden;">
     <!-- Edit Modal -->
     <div class="modal-overlay" id="modal-edit-{{ loop.index }}">
       <div class="modal">
@@ -174,14 +300,44 @@
           <button class="modal-close" onclick="closeModal('edit-{{ loop.index }}')">&times;</button>
         </div>
         <form method="POST" action="{{ url_for('api_update_user', email=u.email) }}">
+          {% if is_system_admin %}
+          <div class="card mb-2" style="padding:10px 12px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.35);">
+            <div style="font-size:.82rem;color:var(--text);">
+              System Admin Full Edit: You can update registration fields here (name, role, department/year, max students, upload permission, password, chief scopes). Lock/Unlock/Delete and student operations are managed by separate buttons.
+            </div>
+          </div>
+          {% endif %}
+          {% if is_chief_admin %}
+          <div class="card mb-2" style="padding:10px 12px;background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.35);">
+            <div style="font-size:.82rem;color:var(--text);">
+              Chief Admin Edit Scope: You can edit only counselors within your assigned department/year scope.
+            </div>
+          </div>
+          {% endif %}
           <div class="form-group">
             <label class="form-label">Name</label>
             <input type="text" class="form-control" name="name" value="{{ u.name }}">
           </div>
+          {% if is_system_admin %}
           <div class="form-row">
             <div class="form-group">
+              <label class="form-label">Email</label>
+              <input type="email" class="form-control" value="{{ u.email }}" readonly>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Role</label>
+              <select class="form-control" name="role" id="editRole-{{ loop.index }}" data-edit-role="{{ loop.index }}" onchange="toggleEditUserFields('{{ loop.index }}')">
+                <option value="counselor" {% if (u.role or 'counselor') == 'counselor' %}selected{% endif %}>Counselor</option>
+                <option value="chief_admin" {% if u.role == 'chief_admin' %}selected{% endif %}>Chief Admin</option>
+                <option value="admin" {% if u.role == 'admin' %}selected{% endif %}>System Admin</option>
+              </select>
+            </div>
+          </div>
+          {% endif %}
+          <div class="form-row" id="editCounselorRow-{{ loop.index }}">
+            <div class="form-group">
               <label class="form-label">Department</label>
-              <select class="form-control" name="department">
+              <select class="form-control" name="department" id="editDepartment-{{ loop.index }}">
                 <option value="">-- None --</option>
                 {% for d in departments %}
                 <option value="{{ d.code }}" {% if d.code == u.department %}selected{% endif %}>{{ d.code }}</option>
@@ -189,19 +345,65 @@
               </select>
             </div>
             <div class="form-group">
+              <label class="form-label">Year</label>
+              <select class="form-control" name="year_level" id="editYearLevel-{{ loop.index }}">
+                <option value="1" {% if (u.year_level or 1) == 1 %}selected{% endif %}>1st Year</option>
+                <option value="2" {% if (u.year_level or 1) == 2 %}selected{% endif %}>2nd Year</option>
+                <option value="3" {% if (u.year_level or 1) == 3 %}selected{% endif %}>3rd Year</option>
+                <option value="4" {% if (u.year_level or 1) == 4 %}selected{% endif %}>4th Year</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row" id="editCapacityRow-{{ loop.index }}">
+            <div class="form-group">
               <label class="form-label">Max Students</label>
-              <input type="number" class="form-control" name="max_students" value="{{ u.max_students }}">
+              <input type="number" class="form-control" name="max_students" id="editMaxStudents-{{ loop.index }}" value="{{ u.max_students }}" min="1" max="500">
             </div>
           </div>
           <div class="form-group">
             <label class="form-label">New Password (leave blank to keep current)</label>
             <input type="password" class="form-control" name="password" placeholder="New password">
           </div>
-          <div class="form-check">
+          <div class="form-check" id="editUploadWrap-{{ loop.index }}">
             <input type="checkbox" name="can_upload_students" id="canUp-{{ loop.index }}"
                    {% if u.can_upload_students %}checked{% endif %}>
             <label for="canUp-{{ loop.index }}">Allow student upload</label>
           </div>
+
+          {% if is_system_admin %}
+          <div class="form-group chief-scope-edit-module {% if u.role != 'chief_admin' %}hidden{% endif %}" id="editChiefScopeWrap-{{ loop.index }}" style="margin-top:12px;"
+            data-chief-scope-key="edit-{{ loop.index }}"
+            data-chief-scopes='{{ (chief_scopes_by_email[u.email] if u.email in chief_scopes_by_email else [])|tojson|forceescape }}'>
+            <label class="form-label">Department Assignment</label>
+            <div style="background:var(--bg-input);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px;">
+              <div class="form-row" style="margin-bottom:12px;">
+                <div class="form-group" style="margin:0;">
+                  <label class="form-label">Department</label>
+                  <input class="form-control" id="chiefDeptSelect-edit-{{ loop.index }}" list="chiefDeptSuggestions-edit-{{ loop.index }}" placeholder="Search and select department" oninput="updateChiefYearOptions('edit-{{ loop.index }}')">
+                  <datalist id="chiefDeptSuggestions-edit-{{ loop.index }}">
+                    {% for d in departments if d.is_active %}
+                    <option value="{{ d.code }}" label="{{ d.name }}"></option>
+                    {% endfor %}
+                  </datalist>
+                </div>
+                <div class="form-group" style="margin:0;">
+                  <label class="form-label">Select Year(s)</label>
+                  <div id="chiefYearOptions-edit-{{ loop.index }}" style="display:flex;gap:10px;flex-wrap:wrap;padding-top:10px;">
+                    <span style="font-size:.82rem;color:var(--text-dim);">Select department first</span>
+                  </div>
+                </div>
+              </div>
+              <button type="button" class="btn btn-sm btn-outline" id="addChiefScopeBtn-edit-{{ loop.index }}" onclick="addChiefScope('edit-{{ loop.index }}')" disabled>
+                <i class="fas fa-plus"></i> Add To List
+              </button>
+              <div id="chiefScopesList-edit-{{ loop.index }}" style="display:none;margin-top:12px;">
+                <label class="form-label">Assigned Departments and Years</label>
+                <div id="selectedChiefScopes-edit-{{ loop.index }}" style="display:flex;flex-wrap:wrap;gap:8px;"></div>
+              </div>
+            </div>
+          </div>
+          {% endif %}
+
           <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save Changes</button>
         </form>
       </div>
@@ -306,12 +508,21 @@
       </div>
     </div>
     {% endif %}
+          </td>
+        </tr>
     {% endfor %}
+    {% if not users %}
+  <tr><td colspan="5" class="text-center text-muted" style="padding:24px;">No users found.</td></tr>
+    {% endif %}
+      </tbody>
+    </table>
   </div>
+  {% endif %}
 </div>
 
 <!-- ==================== DEPARTMENTS TAB ==================== -->
 <div class="tab-panel {% if current_tab == 'departments' %}active{% endif %}" id="tab-departments">
+  {% if is_system_admin %}
   <div class="card mb-3">
     <div class="card-title"><i class="fas fa-plus"></i> Add Department</div>
     <form method="POST" action="{{ url_for('api_create_department') }}">
@@ -328,6 +539,7 @@
       <button type="submit" class="btn btn-primary"><i class="fas fa-plus"></i> Add Department</button>
     </form>
   </div>
+  {% endif %}
 
   <div class="table-wrapper">
     <table>
@@ -345,6 +557,7 @@
           </td>
           <td>
             <div class="btn-group">
+              {% if is_system_admin %}
               <form method="POST" action="{{ url_for('api_toggle_department', dept_id=d.id) }}" style="display:inline">
                 <input type="hidden" name="is_active" value="{{ d.is_active }}">
                 <button class="btn btn-outline btn-sm">
@@ -356,6 +569,9 @@
                     onsubmit="return confirm('Delete department {{ d.code }}?')">
                 <button class="btn btn-danger btn-sm"><i class="fas fa-trash"></i></button>
               </form>
+              {% else %}
+              <span class="badge badge-info">View Only</span>
+              {% endif %}
             </div>
           </td>
         </tr>
@@ -365,68 +581,136 @@
   </div>
 </div>
 
-<!-- ==================== TEST RESULTS TAB ==================== -->
-<div class="tab-panel {% if current_tab == 'tests' %}active{% endif %}" id="tab-tests">
-  <div class="d-flex justify-between align-center flex-wrap mb-2" style="gap:12px;">
-    <h3 class="section-title" style="margin:0"><i class="fas fa-clipboard-check"></i> All Test History</h3>
-  </div>
-
-  <!-- Filters -->
+<!-- ==================== REPORTS TAB ==================== -->
+<div class="tab-panel {% if current_tab == 'reports' %}active{% endif %}" id="tab-reports">
   <div class="card mb-3">
-    <div class="card-title"><i class="fas fa-filter"></i> Filter Tests</div>
-    <form method="GET" action="{{ url_for('admin') }}" id="testFilterForm">
-      <input type="hidden" name="tab" value="tests">
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Batch</label>
-          <select class="form-control" name="filter_batch" onchange="this.form.submit()">
-            <option value="">All Batches</option>
-            {% for b in batches %}
-            <option value="{{ b }}" {% if request.args.get('filter_batch') == b %}selected{% endif %}>{{ b }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Semester</label>
-          <select class="form-control" name="filter_semester" onchange="this.form.submit()">
-            <option value="">All Semesters</option>
-            {% for i in range(1, 9) %}
-            <option value="{{ i }}" {% if request.args.get('filter_semester') == i|string %}selected{% endif %}>Semester {{ i }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Department</label>
-          <select class="form-control" name="filter_dept" onchange="this.form.submit()">
-            <option value="">All Departments</option>
-            {% for d in departments %}
-            <option value="{{ d.code }}" {% if request.args.get('filter_dept') == d.code %}selected{% endif %}>{{ d.code }}</option>
-            {% endfor %}
-          </select>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Counselor</label>
-          <select class="form-control" name="filter_counselor" onchange="this.form.submit()">
-            <option value="">All Counselors</option>
-            {% for u in users if u.role == 'counselor' %}
-            <option value="{{ u.email }}" {% if request.args.get('filter_counselor') == u.email %}selected{% endif %}>{{ u.name }}</option>
-            {% endfor %}
-          </select>
-        </div>
+    <div class="card-title"><i class="fas fa-layer-group"></i> Department and Year Selection</div>
+    <form method="GET" action="{{ url_for('admin') }}" class="form-row" style="align-items:end;">
+      <input type="hidden" name="tab" value="reports">
+      <div class="form-group">
+        <label class="form-label">Department</label>
+        <select class="form-control" name="report_dept" required>
+          <option value="">-- Select --</option>
+          {% for d in departments if d.is_active %}
+          <option value="{{ d.code }}" {% if report_department == d.code %}selected{% endif %}>{{ d.code }} - {{ d.name }}</option>
+          {% endfor %}
+        </select>
       </div>
-      <button type="button" class="btn btn-outline btn-sm" onclick="clearFilters()"><i class="fas fa-times"></i> Clear Filters</button>
+      <div class="form-group">
+        <label class="form-label">Year</label>
+        <select class="form-control" name="report_year" required>
+          <option value="1" {% if report_year_level == 1 %}selected{% endif %}>1st Year</option>
+          <option value="2" {% if report_year_level == 2 %}selected{% endif %}>2nd Year</option>
+          <option value="3" {% if report_year_level == 3 %}selected{% endif %}>3rd Year</option>
+          <option value="4" {% if report_year_level == 4 %}selected{% endif %}>4th Year</option>
+        </select>
+      </div>
+      <div class="btn-group" style="margin-bottom:2px;">
+        <button type="submit" class="btn btn-primary btn-sm"><i class="fas fa-filter"></i> Open</button>
+      </div>
     </form>
   </div>
 
-  <!-- Tests table -->
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-clock"></i> Recent Uploaded Tests</div>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr><th>Test Name</th><th>Department</th><th>Year</th><th>Batch</th><th>Semester</th><th>Uploaded At</th></tr>
+        </thead>
+        <tbody>
+          {% for t in recent_report_tests %}
+          <tr>
+            <td>{{ t.test_name or 'Test #' ~ t.id }}</td>
+            <td>{{ t.department or '—' }}</td>
+            <td>{{ t.year_level or 1 }}</td>
+            <td>{{ t.batch_name or '—' }}</td>
+            <td>{{ t.semester or '—' }}</td>
+            <td>{{ (t.uploaded_at or '')[:16] }}</td>
+          </tr>
+          {% endfor %}
+          {% if not recent_report_tests %}
+          <tr><td colspan="6" class="text-center text-muted" style="padding:16px;">No recent uploads.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  {% if report_department %}
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-file-upload"></i> Upload Marksheet (Admin Only)</div>
+    <form method="POST" action="{{ url_for('api_admin_upload_marksheet') }}" enctype="multipart/form-data">
+      <input type="hidden" name="tab" value="reports">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Department</label>
+          <input class="form-control" name="department" value="{{ report_department }}" readonly>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Year</label>
+          <input class="form-control" name="year_level" value="{{ report_year_level }}" readonly>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Test Name</label>
+          <input class="form-control" list="testNameSuggestionList" name="test_name" required placeholder="Choose or type custom test name">
+          <datalist id="testNameSuggestionList">
+            <option value="Unit Test 1"></option>
+            <option value="Unit Test 2"></option>
+            <option value="IAT 1"></option>
+            <option value="IAT 2"></option>
+            <option value="Model Test"></option>
+          </datalist>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Semester</label>
+          <input class="form-control" list="semesterSuggestionList" name="semester" required placeholder="Choose or type">
+          <datalist id="semesterSuggestionList">
+            <option value="1"></option>
+            <option value="2"></option>
+          </datalist>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Batch</label>
+          <input class="form-control" name="batch_name" required placeholder="2025-26">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Section (Optional)</label>
+          <input class="form-control" name="section" placeholder="A">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Upload Mode</label>
+          <select class="form-control" name="upload_mode">
+            <option value="new">Keep as New Test</option>
+            <option value="replace">Replace Existing Matching Test</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Marksheet File</label>
+          <input type="file" class="form-control" name="marks_file" accept=".xlsx,.xls" required>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary"><i class="fas fa-upload"></i> Upload Marksheet</button>
+    </form>
+  </div>
+
+  <div class="d-flex justify-between align-center flex-wrap mb-2" style="gap:12px;">
+    <h3 class="section-title" style="margin:0"><i class="fas fa-database"></i> Test Database - {{ report_department }} Year {{ report_year_level }}</h3>
+  </div>
   <div class="table-wrapper">
     <table>
       <thead>
         <tr>
           <th>Test Name</th>
+          <th>Year</th>
           <th>Batch</th>
           <th>Semester</th>
-          <th>Department</th>
           <th>Section</th>
           <th>Uploaded By</th>
           <th>Students</th>
@@ -435,24 +719,19 @@
         </tr>
       </thead>
       <tbody>
-        {% for t in all_tests %}
-        <tr {% if t.is_duplicate %}style="background:rgba(248,80,50,0.1)"{% endif %}>
-          <td>
-            <strong>{{ t.test_name or 'Test #' ~ t.id }}</strong>
-            {% if t.is_duplicate %}<span class="badge badge-danger" title="Duplicate upload">DUP</span>{% endif %}
-          </td>
+        {% for t in report_tests %}
+        <tr>
+          <td><strong>{{ t.test_name or 'Test #' ~ t.id }}</strong></td>
+          <td>{{ t.year_level or report_year_level }}</td>
           <td>{{ t.batch_name or '—' }}</td>
           <td>{{ t.semester or '—' }}</td>
-          <td>{{ t.department or '—' }}</td>
           <td>{{ t.section or '—' }}</td>
-          <td>
-            <span style="font-size:.85rem">{{ t.uploaded_by_name or t.uploaded_by or '—' }}</span>
-          </td>
+          <td><span style="font-size:.85rem">{{ t.uploaded_by_name or t.uploaded_by or '—' }}</span></td>
           <td><span class="badge badge-info">{{ t.student_count or 0 }}</span></td>
           <td style="font-size:.82rem">{{ (t.uploaded_at or '')[:16] }}</td>
           <td>
             <div class="btn-group">
-              <button class="btn btn-outline btn-sm" onclick="openTestViewModal({{ t.id }})" title="View Details">
+              <button class="btn btn-outline btn-sm" data-test-id="{{ t.id }}" onclick="openTestViewModalFromButton(this)" title="View Details">
                 <i class="fas fa-eye"></i>
               </button>
               <button class="btn btn-outline btn-sm" onclick="openModal('test-edit-{{ t.id }}')" title="Edit">
@@ -466,17 +745,18 @@
           </td>
         </tr>
         {% endfor %}
-        {% if not all_tests %}
-        <tr><td colspan="9" class="text-center text-muted" style="padding:24px">No tests uploaded yet.</td></tr>
+        {% if not report_tests %}
+        <tr><td colspan="9" class="text-center text-muted" style="padding:24px">No tests uploaded for this department/year yet.</td></tr>
         {% endif %}
       </tbody>
     </table>
   </div>
+  {% endif %}
 
 </div>
 
 <!-- Test View Modals -->
-{% for t in all_tests %}
+{% for t in report_tests %}
 <div class="modal-overlay" id="modal-test-view-{{ t.id }}">
   <div class="modal" style="max-width:700px;">
     <div class="modal-header">
@@ -486,6 +766,7 @@
     <div class="test-details">
       <p><strong>Batch:</strong> {{ t.batch_name or 'N/A' }}</p>
       <p><strong>Semester:</strong> {{ t.semester or 'N/A' }}</p>
+      <p><strong>Year:</strong> {{ t.year_level or report_year_level }}</p>
       <p><strong>Department:</strong> {{ t.department or 'N/A' }}</p>
       <p><strong>Uploaded By:</strong> {{ t.uploaded_by_name or t.uploaded_by or 'Unknown' }}</p>
       <p><strong>Uploaded At:</strong> {{ (t.uploaded_at or 'N/A')[:19] }}</p>
@@ -526,17 +807,23 @@
       </div>
       <div class="form-row">
         <div class="form-group">
+          <label class="form-label">Year</label>
+          <input class="form-control" value="{{ t.year_level or report_year_level }}" readonly>
+        </div>
+        <div class="form-group">
           <label class="form-label">Batch</label>
           <input class="form-control" name="batch_name" value="{{ t.batch_name or '' }}">
         </div>
+      </div>
+      <div class="form-row">
         <div class="form-group">
           <label class="form-label">Section</label>
           <input class="form-control" name="section" value="{{ t.section or '' }}">
         </div>
-      </div>
-      <div class="form-group">
-        <label class="form-label">Department</label>
-        <input class="form-control" name="department" value="{{ t.department or '' }}">
+        <div class="form-group">
+          <label class="form-label">Department</label>
+          <input class="form-control" name="department" value="{{ t.department or '' }}" readonly>
+        </div>
       </div>
       <button class="btn btn-primary" type="submit"><i class="fas fa-save"></i> Save</button>
     </form>
@@ -648,7 +935,7 @@
       {% if a.student_count > 0 %}
       <div class="progress-bar-outer">
         {% set pct = ((a.unique_students_messaged / a.student_count) * 100)|int if a.student_count > 0 else 0 %}
-        <div class="progress-bar-inner" style="width:{{ pct }}%"></div>
+        <div class="progress-bar-inner activity-progress-bar" data-width="{{ pct }}"></div>
       </div>
       <p style="font-size:.78rem;color:var(--text-dim);margin-top:4px;">{{ pct }}% of students reached via messages</p>
       {% endif %}
@@ -932,11 +1219,11 @@
 <!-- ==================== MESSAGE LOGS TAB ==================== -->
 <div class="tab-panel {% if current_tab == 'messages' %}active{% endif %}" id="tab-messages">
   <div class="d-flex justify-between align-center flex-wrap mb-2" style="gap:12px;">
-    <h3 class="section-title" style="margin:0"><i class="fas fa-envelope"></i> Message Activity ({{ messages|length }})</h3>
+    <h3 class="section-title" style="margin:0"><i class="fas fa-envelope"></i> Message Logs</h3>
     <div class="btn-group">
-      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_csv', msg_day=selected_message_day, msg_q=message_query) }}"><i class="fas fa-file-csv"></i> CSV</a>
-      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_excel', msg_day=selected_message_day, msg_q=message_query) }}"><i class="fas fa-file-excel"></i> Excel</a>
-      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_pdf', msg_day=selected_message_day, msg_q=message_query) }}"><i class="fas fa-file-pdf"></i> PDF</a>
+      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_csv', msg_day=selected_message_day, msg_q=message_query, msg_year=selected_message_year, msg_month=selected_message_month, msg_day_num=selected_message_day_num) }}"><i class="fas fa-file-csv"></i> CSV</a>
+      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_excel', msg_day=selected_message_day, msg_q=message_query, msg_year=selected_message_year, msg_month=selected_message_month, msg_day_num=selected_message_day_num) }}"><i class="fas fa-file-excel"></i> Excel</a>
+      <a class="btn btn-outline btn-sm" href="{{ url_for('api_export_messages_pdf', msg_day=selected_message_day, msg_q=message_query, msg_year=selected_message_year, msg_month=selected_message_month, msg_day_num=selected_message_day_num) }}"><i class="fas fa-file-pdf"></i> PDF</a>
     </div>
   </div>
 
@@ -944,8 +1231,34 @@
     <form method="GET" action="{{ url_for('admin') }}" class="form-row" style="align-items:end;">
       <input type="hidden" name="tab" value="messages">
       <div class="form-group">
-        <label class="form-label">Select Day</label>
-        <select class="form-control" name="msg_day" onchange="this.form.submit()">
+        <label class="form-label">Year</label>
+        <input class="form-control" type="number" min="2020" max="2100" name="msg_year" value="{{ selected_message_year or '' }}" placeholder="YYYY">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Month</label>
+        <select class="form-control" name="msg_month">
+          <option value="">All Months</option>
+          <option value="01" {% if selected_message_month == '01' %}selected{% endif %}>January</option>
+          <option value="02" {% if selected_message_month == '02' %}selected{% endif %}>February</option>
+          <option value="03" {% if selected_message_month == '03' %}selected{% endif %}>March</option>
+          <option value="04" {% if selected_message_month == '04' %}selected{% endif %}>April</option>
+          <option value="05" {% if selected_message_month == '05' %}selected{% endif %}>May</option>
+          <option value="06" {% if selected_message_month == '06' %}selected{% endif %}>June</option>
+          <option value="07" {% if selected_message_month == '07' %}selected{% endif %}>July</option>
+          <option value="08" {% if selected_message_month == '08' %}selected{% endif %}>August</option>
+          <option value="09" {% if selected_message_month == '09' %}selected{% endif %}>September</option>
+          <option value="10" {% if selected_message_month == '10' %}selected{% endif %}>October</option>
+          <option value="11" {% if selected_message_month == '11' %}selected{% endif %}>November</option>
+          <option value="12" {% if selected_message_month == '12' %}selected{% endif %}>December</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Day</label>
+        <input class="form-control" type="number" min="1" max="31" name="msg_day_num" value="{{ selected_message_day_num or '' }}" placeholder="DD">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Exact Date</label>
+        <select class="form-control" name="msg_day">
           <option value="">All Days</option>
           {% for d in message_days %}
           <option value="{{ d.day }}" {% if selected_message_day == d.day %}selected{% endif %}>{{ d.day }} ({{ d.total }})</option>
@@ -954,7 +1267,12 @@
       </div>
       <div class="form-group">
         <label class="form-label">Search Counselor Name</label>
-        <input class="form-control" type="text" name="msg_q" value="{{ message_query or '' }}" placeholder="Type counselor name">
+        <input class="form-control" list="counselorNameSuggestions" type="text" name="msg_q" value="{{ message_query or '' }}" placeholder="Type counselor name">
+        <datalist id="counselorNameSuggestions">
+          {% for c in counselor_suggestions %}
+          <option value="{{ c.name }}"></option>
+          {% endfor %}
+        </datalist>
       </div>
       <div class="btn-group" style="margin-bottom:2px;">
         <button class="btn btn-primary btn-sm" type="submit"><i class="fas fa-filter"></i> Apply</button>
@@ -1022,6 +1340,9 @@
                     <input type="hidden" name="tab" value="messages">
                     <input type="hidden" name="msg_day" value="{{ selected_message_day or '' }}">
                     <input type="hidden" name="msg_q" value="{{ message_query or '' }}">
+                    <input type="hidden" name="msg_year" value="{{ selected_message_year or '' }}">
+                    <input type="hidden" name="msg_month" value="{{ selected_message_month or '' }}">
+                    <input type="hidden" name="msg_day_num" value="{{ selected_message_day_num or '' }}">
                     <button class="btn btn-danger btn-sm" type="submit"><i class="fas fa-trash"></i></button>
                   </form>
                 </td>
@@ -1047,6 +1368,9 @@
     <input type="hidden" name="tab" value="messages">
     <input type="hidden" name="msg_day" value="{{ selected_message_day or '' }}">
     <input type="hidden" name="msg_q" value="{{ message_query or '' }}">
+    <input type="hidden" name="msg_year" value="{{ selected_message_year or '' }}">
+    <input type="hidden" name="msg_month" value="{{ selected_message_month or '' }}">
+    <input type="hidden" name="msg_day_num" value="{{ selected_message_day_num or '' }}">
   </form>
 </div>
 {% endblock %}
@@ -1062,7 +1386,7 @@ const ADMIN_TEST_VIEW_IGNORED_KEYS = new Set([
 ]);
 
 function clearFilters() {
-  window.location.href = '{{ url_for("admin") }}?tab=tests';
+  window.location.href = '{{ url_for("admin") }}?tab=reports';
 }
 
 function toggleSelectAllMessages(checked) {
@@ -1185,45 +1509,112 @@ async function openTestViewModal(testId) {
 
 function toggleCreateUserFields() {
   const roleEl = document.getElementById('createUserRole');
-  const isAdmin = roleEl && roleEl.value === 'admin';
+  const roleValue = roleEl ? roleEl.value : 'counselor';
+  const isSystemAdmin = roleValue === 'admin';
+  const isChiefAdmin = roleValue === 'chief_admin';
+  const isCounselor = roleValue === 'counselor';
 
   const counselorRow = document.getElementById('createUserCounselorRow');
+  const counselorCapacityRow = document.getElementById('createUserCounselorCapacityRow');
   const uploadPermissionWrap = document.getElementById('createUserUploadPermissionWrap');
   const studentUploadWrap = document.getElementById('createUserStudentUploadWrap');
+  const chiefScopeWrap = document.getElementById('createUserChiefScopeWrap');
 
   const deptEl = document.getElementById('createUserDepartment');
+  const yearLevelEl = document.getElementById('createUserYearLevel');
   const maxStudentsEl = document.getElementById('createUserMaxStudents');
   const canUploadEl = document.getElementById('canUpload');
   const studentFileEl = document.getElementById('createUserStudentFile');
 
-  if (counselorRow) counselorRow.style.display = isAdmin ? 'none' : '';
-  if (uploadPermissionWrap) uploadPermissionWrap.style.display = isAdmin ? 'none' : '';
-  if (studentUploadWrap) studentUploadWrap.style.display = isAdmin ? 'none' : '';
+  if (counselorRow) counselorRow.style.display = isCounselor ? '' : 'none';
+  if (counselorCapacityRow) counselorCapacityRow.style.display = isCounselor ? '' : 'none';
+  if (uploadPermissionWrap) uploadPermissionWrap.style.display = isCounselor ? '' : 'none';
+  if (studentUploadWrap) studentUploadWrap.style.display = isCounselor ? '' : 'none';
+  if (chiefScopeWrap) chiefScopeWrap.style.display = isChiefAdmin ? '' : 'none';
 
   if (deptEl) {
-    deptEl.disabled = isAdmin;
-    if (isAdmin) deptEl.value = '';
+    deptEl.disabled = !isCounselor;
+    if (!isCounselor) deptEl.value = '';
+  }
+
+  if (yearLevelEl) {
+    yearLevelEl.disabled = !isCounselor;
+    if (!isCounselor) yearLevelEl.value = '1';
   }
 
   if (maxStudentsEl) {
-    maxStudentsEl.disabled = isAdmin;
-    if (isAdmin) maxStudentsEl.value = '500';
+    maxStudentsEl.disabled = !isCounselor;
+    if (!isCounselor) maxStudentsEl.value = '500';
     else if (!maxStudentsEl.value) maxStudentsEl.value = '30';
   }
 
   if (canUploadEl) {
-    canUploadEl.disabled = isAdmin;
-    canUploadEl.checked = isAdmin ? true : canUploadEl.checked;
+    canUploadEl.disabled = !isCounselor;
+    canUploadEl.checked = isCounselor ? canUploadEl.checked : true;
   }
 
   if (studentFileEl) {
-    studentFileEl.disabled = isAdmin;
-    if (isAdmin) {
+    studentFileEl.disabled = !isCounselor;
+    if (!isCounselor) {
       studentFileEl.value = '';
       const lbl = document.getElementById('createFileLabel');
       if (lbl) lbl.textContent = '';
     }
   }
+}
+
+function toggleEditUserFields(userIndex) {
+  const idx = String(userIndex || '');
+  const roleEl = document.getElementById(`editRole-${idx}`);
+  if (!roleEl) return;
+
+  const roleValue = roleEl.value || 'counselor';
+  const isSystemAdminRole = roleValue === 'admin';
+  const isChiefAdminRole = roleValue === 'chief_admin';
+  const isCounselorRole = roleValue === 'counselor';
+
+  const counselorRow = document.getElementById(`editCounselorRow-${idx}`);
+  const capacityRow = document.getElementById(`editCapacityRow-${idx}`);
+  const uploadWrap = document.getElementById(`editUploadWrap-${idx}`);
+  const chiefScopeWrap = document.getElementById(`editChiefScopeWrap-${idx}`);
+  const departmentEl = document.getElementById(`editDepartment-${idx}`);
+  const yearLevelEl = document.getElementById(`editYearLevel-${idx}`);
+  const maxStudentsEl = document.getElementById(`editMaxStudents-${idx}`);
+  const canUploadEl = document.getElementById(`canUp-${idx}`);
+
+  if (counselorRow) counselorRow.style.display = isSystemAdminRole ? 'none' : '';
+  if (capacityRow) capacityRow.style.display = isCounselorRole ? '' : 'none';
+  if (uploadWrap) uploadWrap.style.display = isCounselorRole ? '' : 'none';
+  if (chiefScopeWrap) chiefScopeWrap.style.display = isChiefAdminRole ? '' : 'none';
+
+  if (departmentEl) {
+    departmentEl.disabled = isSystemAdminRole;
+    if (isSystemAdminRole) departmentEl.value = '';
+  }
+
+  if (yearLevelEl) {
+    yearLevelEl.disabled = !isCounselorRole;
+    if (!isCounselorRole) yearLevelEl.value = '1';
+  }
+
+  if (maxStudentsEl) {
+    maxStudentsEl.disabled = !isCounselorRole;
+    if (isSystemAdminRole || isChiefAdminRole) maxStudentsEl.value = '500';
+    else if (!maxStudentsEl.value) maxStudentsEl.value = '30';
+  }
+
+  if (canUploadEl) {
+    canUploadEl.disabled = !isCounselorRole;
+    if (!isCounselorRole) canUploadEl.checked = true;
+  }
+}
+
+function filterUserCards() {
+  const q = (document.getElementById('userSearchBox')?.value || '').trim().toLowerCase();
+  document.querySelectorAll('.user-card[data-user-search]').forEach((card) => {
+    const hay = card.getAttribute('data-user-search') || '';
+    card.style.display = !q || hay.includes(q) ? '' : 'none';
+  });
 }
 
 function togglePasswordInput(inputId, iconId) {
@@ -1240,15 +1631,30 @@ function togglePasswordInput(inputId, iconId) {
   }
 }
 
-const RESET_USERS = [
-  {% for u in users %}
-  {
-    email: {{ u.email|tojson }},
-    name: {{ u.name|tojson }},
-    role: {{ u.role|tojson }}
-  }{% if not loop.last %},{% endif %}
-  {% endfor %}
-];
+const adminScriptData = document.getElementById('adminScriptData');
+const RESET_USERS = (() => {
+  if (!adminScriptData) return [];
+  const raw = adminScriptData.getAttribute('data-reset-users') || '[]';
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return [];
+  }
+})();
+
+function openTestViewModalFromButton(btn) {
+  const id = Number(btn?.dataset?.testId || 0);
+  if (!id) return;
+  openTestViewModal(id);
+}
+
+function applyActivityProgressWidths() {
+  document.querySelectorAll('.activity-progress-bar[data-width]').forEach((el) => {
+    const pct = Number(el.getAttribute('data-width') || '0');
+    const safePct = Number.isFinite(pct) ? Math.max(0, Math.min(100, pct)) : 0;
+    el.style.width = `${safePct}%`;
+  });
+}
 
 function escapeHtml(str) {
   return String(str)
@@ -1324,7 +1730,7 @@ function validateResetUserSelection() {
 }
 
 function syncAdminPostFormsWithTab() {
-  const currentTab = {{ request.args.get('tab', 'users')|tojson }};
+  const currentTab = adminScriptData ? (adminScriptData.getAttribute('data-current-tab') || 'users') : 'users';
   document.querySelectorAll('form[method="POST"], form[method="post"]').forEach((form) => {
     const existing = form.querySelector('input[name="tab"]');
     if (existing) {
@@ -1355,6 +1761,11 @@ function reopenRequestedManageModal() {
 
 document.addEventListener('DOMContentLoaded', () => {
   toggleCreateUserFields();
+  document.querySelectorAll('[data-edit-role]').forEach((el) => {
+    const idx = el.getAttribute('data-edit-role');
+    if (idx) toggleEditUserFields(idx);
+  });
+  applyActivityProgressWidths();
   syncAdminPostFormsWithTab();
   reopenRequestedManageModal();
 });

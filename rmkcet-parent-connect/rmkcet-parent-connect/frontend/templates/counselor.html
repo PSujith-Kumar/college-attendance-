@@ -3,6 +3,23 @@
 {% block page_title %}Counselor Panel{% endblock %}
 
 {% block content %}
+
+{% if is_blocked_department %}
+<div style="display:flex;align-items:center;justify-content:center;min-height:calc(100vh - 200px);">
+  <div class="card" style="max-width:500px;text-align:center;border:1px solid rgba(239,68,68,.35);">
+    <div style="font-size:4rem;margin-bottom:20px;"><i class="fas fa-ban" style="color:var(--danger);"></i></div>
+    <div class="card-title"><i class="fas fa-ban"></i> Department Blocked</div>
+    <p style="font-size:.95rem;color:var(--text);line-height:1.8;margin-bottom:16px;">
+      Your department has been temporarily disabled by the administration. Access to all features is restricted.
+    </p>
+    <p style="font-size:.85rem;color:var(--text-dim);margin-bottom:20px;">
+      Please contact your system administrator to restore access or check back later.
+    </p>
+    <a href="{{ url_for('logout') }}" class="btn btn-outline"><i class="fas fa-sign-out-alt"></i> Logout</a>
+  </div>
+</div>
+{% else %}
+
 <div class="metrics-grid">
   <div class="metric-card">
     <div class="metric-label">My Students</div>
@@ -26,88 +43,23 @@
   </div>
 </div>
 
-{% set current_tab = request.args.get('tab', 'reports') %}
-
-<div class="tab-panel {% if current_tab == 'reports' %}active{% endif %}" id="tab-reports">
-  <div class="card mb-3" style="max-width:860px;">
-    <div class="card-title"><i class="fas fa-file-excel"></i> Upload Department Marksheet</div>
-    <div class="d-flex align-center justify-between mb-2" style="gap:10px;flex-wrap:wrap;">
-      <span class="badge badge-info">Assigned Students: {{ assigned_students_count or 0 }}</span>
-      <span class="badge badge-warning">Match Required: Reg No + Name</span>
-    </div>
-    {% if (assigned_students_count or 0) == 0 %}
-    <div class="flash flash-warning" style="margin-bottom:12px;">
-      <i class="fas fa-exclamation-triangle"></i>
-      <span>No students assigned yet. Ask Admin to assign students before uploading marksheet.</span>
-    </div>
-    {% endif %}
-    <form method="POST" action="{{ url_for('api_upload_marks') }}" enctype="multipart/form-data">
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Test Name</label>
-          <input class="form-control" name="test_name" placeholder="Ex: Unit Test 1">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Semester</label>
-          <input class="form-control" name="semester" placeholder="Ex: 5">
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Batch</label>
-          <input class="form-control" name="batch_name" placeholder="Ex: 2024-25">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Section</label>
-          <input class="form-control" name="section" placeholder="Ex: A">
-        </div>
-      </div>
-      <div class="form-row">
-        <div class="form-group">
-          <label class="form-label">Department</label>
-          <input class="form-control" name="department" value="{{ user.department or '' }}">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Upload Mode</label>
-          <select class="form-control" name="upload_mode" id="uploadMode" onchange="toggleReplaceTarget()">
-            <option value="new">Keep As New Test</option>
-            <option value="replace">Replace Existing Test</option>
-          </select>
-        </div>
-      </div>
-      <div class="form-group" id="replaceTargetWrap" style="display:none;">
-        <label class="form-label">Replace Which Test</label>
-        <select class="form-control" name="replace_test_id">
-          <option value="">-- Select --</option>
-          {% for t in tests %}
-          <option value="{{ t.id }}">{{ t.test_name }}{% if t.batch_name %} ({{ t.batch_name }}){% endif %}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div class="form-group">
-        <div class="file-input-wrapper">
-          <i class="fas fa-chart-bar"></i>
-          <div class="file-text">Drop marks Excel file here or click to browse</div>
-          <div class="file-name" id="marksFileLabel"></div>
-          <input type="file" name="marks_file" accept=".xlsx,.xls" required onchange="showFileName(this, 'marksFileLabel')">
-        </div>
-        <p style="font-size:.8rem;color:var(--text-dim);margin-top:8px;">
-          Upload rule: only students already assigned by Admin with matching <strong>Reg No + Name</strong> are allowed.
-          If any row mismatches, upload will be blocked.
-        </p>
-      </div>
-      <button type="submit" class="btn btn-primary" {% if (assigned_students_count or 0) == 0 %}disabled title="No students assigned"{% endif %}>
-        <i class="fas fa-upload"></i> Upload
-      </button>
-    </form>
+{% set current_tab = request.args.get('tab', 'recent-tests') %}
+<div class="tab-panel {% if current_tab == 'recent-tests' %}active{% endif %}" id="tab-recent-tests">
+  <div class="card mb-3">
+    <div class="card-title"><i class="fas fa-info-circle"></i> Workflow Updated</div>
+    <p style="font-size:.86rem;color:var(--text-dim);line-height:1.5;">
+      Marksheet uploads are now handled only by Admin in Departments tab. You can view, edit test metadata,
+      and send WhatsApp results for tests mapped to your department and year.
+    </p>
   </div>
 
-  <h3 class="section-title"><i class="fas fa-clipboard-list"></i> My Uploaded Tests</h3>
+  <h3 class="section-title"><i class="fas fa-clock"></i> Recent Tests (Last 2)</h3>
   <div class="table-wrapper">
     <table>
       <thead>
         <tr>
           <th>Test Name</th>
+          <th>Year</th>
           <th>Batch</th>
           <th>Sem</th>
           <th>Section</th>
@@ -117,11 +69,12 @@
         </tr>
       </thead>
       <tbody>
-        {% for t in tests %}
+        {% for t in recent_tests %}
         {% set generated = t.generated_count or 0 %}
         {% set total = t.student_count or 0 %}
         <tr>
           <td><strong>{{ t.test_name or 'Test #' ~ t.id }}</strong></td>
+          <td>{{ t.year_level or (user.year_level or 1) }}</td>
           <td>{{ t.batch_name or '—' }}</td>
           <td>{{ t.semester or '—' }}</td>
           <td>{{ t.section or '—' }}</td>
@@ -138,7 +91,67 @@
               <a class="btn btn-outline btn-sm" href="{{ url_for('counselor_test_view_page', test_id=t.id) }}">
                 <i class="fas fa-eye"></i> View
               </a>
-              <a class="btn btn-primary btn-sm" href="{{ url_for('counselor_test_send_page', test_id=t.id) }}">
+              <button class="btn btn-outline btn-sm" onclick="openModal('test-edit-{{ t.id }}')" {% if is_blocked_department %}disabled{% endif %}>
+                <i class="fas fa-pen"></i> Edit
+              </button>
+              <a class="btn btn-primary btn-sm {% if is_blocked_department %}disabled{% endif %}" href="{{ url_for('counselor_test_send_page', test_id=t.id) }}">
+                <i class="fas fa-paper-plane"></i> Send Results
+              </a>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not recent_tests %}
+        <tr><td colspan="8" class="text-center text-muted" style="padding:20px;">No recent tests available yet.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="tab-panel {% if current_tab == 'test-database' %}active{% endif %}" id="tab-test-database">
+  <h3 class="section-title"><i class="fas fa-database"></i> Test Database</h3>
+  <div class="table-wrapper">
+    <table>
+      <thead>
+        <tr>
+          <th>Test Name</th>
+          <th>Year</th>
+          <th>Batch</th>
+          <th>Sem</th>
+          <th>Section</th>
+          <th>Students</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in tests %}
+        {% set generated = t.generated_count or 0 %}
+        {% set total = t.student_count or 0 %}
+        <tr>
+          <td><strong>{{ t.test_name or 'Test #' ~ t.id }}</strong></td>
+          <td>{{ t.year_level or (user.year_level or 1) }}</td>
+          <td>{{ t.batch_name or '—' }}</td>
+          <td>{{ t.semester or '—' }}</td>
+          <td>{{ t.section or '—' }}</td>
+          <td>{{ total }}</td>
+          <td>
+            {% if generated > 0 %}
+            <span class="badge badge-success">Generated</span>
+            {% else %}
+            <span class="badge badge-warning">Pending</span>
+            {% endif %}
+          </td>
+          <td>
+            <div class="btn-group">
+              <a class="btn btn-outline btn-sm" href="{{ url_for('counselor_test_view_page', test_id=t.id) }}">
+                <i class="fas fa-eye"></i> View
+              </a>
+              <button class="btn btn-outline btn-sm" onclick="openModal('test-edit-{{ t.id }}')" {% if is_blocked_department %}disabled{% endif %}>
+                <i class="fas fa-pen"></i> Edit
+              </button>
+              <a class="btn btn-primary btn-sm {% if is_blocked_department %}disabled{% endif %}" href="{{ url_for('counselor_test_send_page', test_id=t.id) }}">
                 <i class="fas fa-paper-plane"></i> Send Results
               </a>
             </div>
@@ -146,58 +159,77 @@
         </tr>
         {% endfor %}
         {% if not tests %}
-        <tr><td colspan="7" class="text-center text-muted" style="padding:20px;">No visible tests yet.</td></tr>
+        <tr><td colspan="8" class="text-center text-muted" style="padding:20px;">No tests mapped to your department/year yet.</td></tr>
         {% endif %}
       </tbody>
     </table>
   </div>
 </div>
 
-<div class="tab-panel {% if current_tab == 'history' %}active{% endif %}" id="tab-history">
-  <h3 class="section-title"><i class="fas fa-history"></i> Sent History</h3>
+<div class="tab-panel {% if current_tab == 'message-history' %}active{% endif %}" id="tab-message-history">
+  <h3 class="section-title"><i class="fas fa-envelope-open-text"></i> Recent Message History</h3>
   <div class="table-wrapper">
     <table>
       <thead>
-        <tr>
-          <th>Roll No</th>
-          <th>Name</th>
-          <th>Status</th>
-          <th>Sent At</th>
-        </tr>
+        <tr><th>Date</th><th>Student</th><th>Reg No</th><th>Status</th><th>Format</th></tr>
       </thead>
       <tbody>
         {% for m in msg_history %}
         <tr>
-          <td><strong>{{ m.reg_no }}</strong></td>
-          <td>{{ m.student_name }}</td>
-          <td>
-            {% if (m.status or '')|lower in ['sent', 'generated'] %}
-            <span class="badge badge-success">Generated</span>
-            {% else %}
-            <span class="badge badge-warning">Pending</span>
-            {% endif %}
-          </td>
-          <td style="font-size:.82rem">{{ (m.sent_at or '')[:19] }}</td>
+          <td>{{ (m.sent_at or '')[:16] }}</td>
+          <td>{{ m.student_name or '—' }}</td>
+          <td>{{ m.reg_no or '—' }}</td>
+          <td><span class="badge {% if (m.status or '').lower() == 'sent' %}badge-success{% else %}badge-warning{% endif %}">{{ m.status or 'sent' }}</span></td>
+          <td>{{ m.format or 'message' }}</td>
         </tr>
         {% endfor %}
         {% if not msg_history %}
-        <tr><td colspan="4" class="text-center text-muted" style="padding:20px;">No history available.</td></tr>
+        <tr><td colspan="5" class="text-center text-muted" style="padding:20px;">No message history available yet.</td></tr>
         {% endif %}
       </tbody>
     </table>
   </div>
 </div>
+
+{% for t in tests %}
+<div class="modal-overlay" id="modal-test-edit-{{ t.id }}">
+  <div class="modal" style="max-width:640px;">
+    <div class="modal-header">
+      <h3><i class="fas fa-pen"></i> Edit Test</h3>
+      <button class="modal-close" onclick="closeModal('test-edit-{{ t.id }}')">&times;</button>
+    </div>
+    <form method="POST" action="{{ url_for('api_counselor_update_test', test_id=t.id) }}">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Test Name</label>
+          <input class="form-control" name="test_name" value="{{ t.test_name or '' }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Semester</label>
+          <input class="form-control" name="semester" value="{{ t.semester or '' }}">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Batch</label>
+          <input class="form-control" name="batch_name" value="{{ t.batch_name or '' }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Section</label>
+          <input class="form-control" name="section" value="{{ t.section or '' }}">
+        </div>
+      </div>
+      <button class="btn btn-primary" type="submit"><i class="fas fa-save"></i> Save</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
+
+{% endif %}
+
 {% endblock %}
 
 {% block scripts %}
 <script>
-function toggleReplaceTarget() {
-  const mode = document.getElementById('uploadMode');
-  const wrap = document.getElementById('replaceTargetWrap');
-  if (!mode || !wrap) return;
-  wrap.style.display = mode.value === 'replace' ? '' : 'none';
-}
-
-document.addEventListener('DOMContentLoaded', toggleReplaceTarget);
 </script>
 {% endblock %}
