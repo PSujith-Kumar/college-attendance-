@@ -5,9 +5,10 @@ from config import COUNTRY_CODE
 
 
 def get_whatsapp_link(phone_number, message: str) -> str:
-    """Generate direct WhatsApp app deep-link with pre-filled message."""
+    """Generate a direct WhatsApp app deep link with pre-filled message."""
     phone = ''.join(c for c in str(phone_number) if c.isdigit())[-10:]
-    full_phone = f"{COUNTRY_CODE}{phone}"
+    cc = ''.join(c for c in str(COUNTRY_CODE) if c.isdigit()) or "91"
+    full_phone = f"{cc}{phone}"
     encoded = urllib.parse.quote(message)
     return f"whatsapp://send?phone={full_phone}&text={encoded}"
 

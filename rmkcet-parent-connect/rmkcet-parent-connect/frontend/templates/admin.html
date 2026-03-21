@@ -3,30 +3,6 @@
 {% block page_title %}Admin Panel{% endblock %}
 
 {% block content %}
-<!-- ============ METRICS ============ -->
-<div class="metrics-grid">
-  <div class="metric-card">
-    <div class="metric-label">Total Users</div>
-    <div class="metric-value">{{ users|length }}</div>
-    <div class="metric-icon"><i class="fas fa-users"></i></div>
-  </div>
-  <div class="metric-card">
-    <div class="metric-label">Counselors</div>
-    <div class="metric-value">{{ counselor_count }}</div>
-    <div class="metric-icon"><i class="fas fa-chalkboard-teacher"></i></div>
-  </div>
-  <div class="metric-card">
-    <div class="metric-label">Active Sessions</div>
-    <div class="metric-value">{{ session_count }}</div>
-    <div class="metric-icon"><i class="fas fa-signal"></i></div>
-  </div>
-  <div class="metric-card">
-    <div class="metric-label">Messages Sent</div>
-    <div class="metric-value">{{ msg_stats.total }}</div>
-    <div class="metric-icon"><i class="fas fa-paper-plane"></i></div>
-  </div>
-</div>
-
 {% set current_tab = request.args.get('tab', 'users') %}
 <div id="adminScriptData"
   data-current-tab="{{ request.args.get('tab', 'users') }}"
@@ -36,6 +12,29 @@
 <!-- ==================== USERS TAB ==================== -->
 <div class="tab-panel {% if current_tab == 'users' %}active{% endif %}" id="tab-users">
   {% if current_tab == 'users' %}
+  <!-- ============ METRICS (Users Tab Only) ============ -->
+  <div class="metrics-grid mb-3">
+    <div class="metric-card">
+      <div class="metric-label">Total Users</div>
+      <div class="metric-value">{{ users|length }}</div>
+      <div class="metric-icon"><i class="fas fa-users"></i></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Counselors</div>
+      <div class="metric-value">{{ counselor_count }}</div>
+      <div class="metric-icon"><i class="fas fa-chalkboard-teacher"></i></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Active Sessions</div>
+      <div class="metric-value">{{ session_count }}</div>
+      <div class="metric-icon"><i class="fas fa-signal"></i></div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-label">Messages Sent</div>
+      <div class="metric-value">{{ msg_stats.total }}</div>
+      <div class="metric-icon"><i class="fas fa-paper-plane"></i></div>
+    </div>
+  </div>
   <!-- Create User -->
   <div class="card mb-3">
     <div class="card-title"><i class="fas fa-user-plus"></i> Register New User</div>
@@ -233,7 +232,16 @@
             {% endif %}
           {% endfor %}
         {% endif %}
-        {% set can_edit_user = is_system_admin or (is_chief_admin and u.role == 'counselor' and scope_key in chief_scope_keys) %}
+        {# Check if chief admin has scope overlap with current user #}
+        {% set chief_admin_has_overlap = false %}
+        {% if is_chief_admin and u.role == 'chief_admin' %}
+          {% for assignment in chief_assignments %}
+            {% if assignment in chief_scope_keys %}
+              {% set chief_admin_has_overlap = true %}
+            {% endif %}
+          {% endfor %}
+        {% endif %}
+        {% set can_edit_user = is_system_admin or (is_chief_admin and ((u.role == 'counselor' and scope_key in chief_scope_keys) or (u.role == 'chief_admin' and chief_admin_has_overlap))) %}
         {% set can_manage_user = (is_system_admin and (u.role != 'admin' or u.email != current_user_email)) or (is_chief_admin and can_edit_user) %}
         <tr class="user-row" data-user-name="{{ u.name|lower }}" data-user-name-display="{{ u.name }}" data-user-role="{{ u.role or 'counselor' }}" data-user-dept="{{ u.department or '' }}" data-user-status="{% if u.is_active and not u.is_locked %}active{% else %}inactive{% endif %}" data-user-created="{{ u.created_at or '' }}">
           <td>
@@ -303,14 +311,16 @@
           {% if is_system_admin %}
           <div class="card mb-2" style="padding:10px 12px;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.35);">
             <div style="font-size:.82rem;color:var(--text);">
-              System Admin Full Edit: You can update registration fields here (name, role, department/year, max students, upload permission, password, chief scopes). Lock/Unlock/Delete and student operations are managed by separate buttons.
+              <strong>Edit User Account Details</strong>: Update name, role, department/year, max students, upload permission, password, and chief scope access here.
+              Student records are not edited in this form. Use <strong>Manage Students</strong> to add, edit, or delete student details.
             </div>
           </div>
           {% endif %}
           {% if is_chief_admin %}
           <div class="card mb-2" style="padding:10px 12px;background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.35);">
             <div style="font-size:.82rem;color:var(--text);">
-              Chief Admin Edit Scope: You can edit only counselors within your assigned department/year scope.
+              <strong>Edit User Account Details</strong>: You can edit counselors and other chief admins in your assigned department/year scope.
+              Student records are managed separately using <strong>Manage Students</strong>.
             </div>
           </div>
           {% endif %}
@@ -404,6 +414,98 @@
           </div>
           {% endif %}
 
+          <!-- Student Management Section for Counselors -->
+          {% if u.role == 'counselor' %}
+          <div class="card mt-3 mb-2" style="padding:14px;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.30);">
+            <div class="d-flex justify-between align-center mb-3">
+              <label class="form-label"><i class="fas fa-users"></i> Student Management</label>
+              <span class="badge badge-success">{{ students_map.get(u.email, [])|length }} students</span>
+            </div>
+            
+            <!-- Quick Actions -->
+            <div class="d-flex" style="gap:10px;flex-wrap:wrap;margin-bottom:12px;">
+              <button type="button" class="btn btn-outline btn-sm" onclick="openModal('manage-students-{{ loop.index }}')">
+                <i class="fas fa-pen"></i> Edit/View All
+              </button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="openModal('upload-{{ loop.index }}')">
+                <i class="fas fa-upload"></i> Upload Excel
+              </button>
+              <button type="button" class="btn btn-outline btn-sm" onclick="toggleStudentQuickAdd('{{ loop.index }}')" title="Add single student quickly">
+                <i class="fas fa-plus"></i> Add Student
+              </button>
+              <form method="POST" action="{{ url_for('api_admin_delete_all_students') }}" onsubmit="return confirm('Delete all students for {{ u.name }}? This cannot be undone.')" style="display:inline;">
+                <input type="hidden" name="counselor_email" value="{{ u.email }}">
+                <button type="submit" class="btn btn-danger btn-sm">
+                  <i class="fas fa-trash"></i> Delete All
+                </button>
+              </form>
+            </div>
+
+            <!-- Quick Add Student Form (Hidden by default) -->
+            <div id="quickAddStudent-{{ loop.index }}" style="display:none;padding:12px;background:var(--bg-input);border-radius:var(--radius-sm);border:1px solid var(--border);margin-bottom:12px;">
+              <form method="POST" action="{{ url_for('api_admin_save_student') }}" style="margin-bottom:10px;">
+                <input type="hidden" name="counselor_email" value="{{ u.email }}">
+                <div class="form-row">
+                  <div class="form-group" style="margin:0;">
+                    <input type="text" class="form-control" name="reg_no" placeholder="Registration No" required style="min-width:100px;">
+                  </div>
+                  <div class="form-group" style="margin:0;">
+                    <input type="text" class="form-control" name="student_name" placeholder="Student Name" required style="min-width:120px;">
+                  </div>
+                  <div class="form-group" style="margin:0;">
+                    <input type="email" class="form-control" name="parent_email" placeholder="Parent Email" style="min-width:140px;">
+                  </div>
+                  <div class="form-group" style="margin:0;">
+                    <button type="submit" class="btn btn-success btn-sm" style="width:100%;">Add</button>
+                  </div>
+                </div>
+              </form>
+            </div>
+
+            <!-- Student List Preview (First 5 students) -->
+            {% set counselor_students = students_map.get(u.email, []) %}
+            {% if counselor_students %}
+            <div style="max-height:200px;overflow-y:auto;">
+              <table style="font-size:.85rem;">
+                <thead>
+                  <tr style="background:rgba(0,0,0,.05);">
+                    <th style="padding:6px;">Reg No</th>
+                    <th style="padding:6px;">Name</th>
+                    <th style="padding:6px;">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for st in counselor_students[:5] %}
+                  <tr style="border-bottom:1px solid var(--border);">
+                    <td style="padding:6px;">{{ st.reg_no }}</td>
+                    <td style="padding:6px;">{{ st.student_name }}</td>
+                    <td style="padding:6px;">
+                      <form method="POST" action="{{ url_for('api_admin_delete_student') }}" onsubmit="return confirm('Delete {{ st.reg_no }}?')" style="display:inline;">
+                        <input type="hidden" name="counselor_email" value="{{ u.email }}">
+                        <input type="hidden" name="reg_no" value="{{ st.reg_no }}">
+                        <button type="submit" class="btn btn-danger btn-xs" style="padding:2px 6px;font-size:.75rem;" title="Delete">
+                          <i class="fas fa-trash"></i>
+                        </button>
+                      </form>
+                    </td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+              {% if counselor_students|length > 5 %}
+              <div style="padding:8px;text-align:center;font-size:.82rem;color:var(--text-dim);border-top:1px solid var(--border);margin-top:8px;">
+                ... and {{ counselor_students|length - 5 }} more.
+              </div>
+              {% endif %}
+            </div>
+            {% else %}
+            <div style="padding:12px;text-align:center;color:var(--text-dim);font-size:.82rem;background:rgba(100,100,100,.05);border-radius:var(--radius-sm);border:1px solid var(--border);">
+              <i class="fas fa-info-circle"></i> No students assigned yet.
+            </div>
+            {% endif %}
+          </div>
+          {% endif %}
+
           <button type="submit" class="btn btn-primary"><i class="fas fa-save"></i> Save Changes</button>
         </form>
       </div>
@@ -460,11 +562,13 @@
             <div class="form-row">
               <div class="form-group"><label class="form-label">Reg No</label><input class="form-control" name="reg_no" required></div>
               <div class="form-group"><label class="form-label">Student Name</label><input class="form-control" name="student_name" required></div>
-              <div class="form-group"><label class="form-label">Department</label><input class="form-control" name="department" value="{{ u.department or '' }}"></div>
+              <div class="form-group">
+                <label class="form-label">Department</label>
+                <input class="form-control" value="{{ u.department or '' }}" readonly>
+              </div>
             </div>
             <div class="form-row">
               <div class="form-group"><label class="form-label">Parent Phone</label><input class="form-control" name="parent_phone"></div>
-              <div class="form-group"><label class="form-label">Parent Email</label><input class="form-control" name="parent_email" type="email"></div>
             </div>
             <button class="btn btn-primary btn-sm"><i class="fas fa-plus"></i> Add Student</button>
           </form>
@@ -473,7 +577,7 @@
         <div class="table-wrapper">
           <table>
             <thead>
-              <tr><th>Reg No</th><th>Name</th><th>Department</th><th>Phone</th><th>Email</th><th>Actions</th></tr>
+              <tr><th>Reg No</th><th>Name</th><th>Department</th><th>Phone</th><th>Actions</th></tr>
             </thead>
             <tbody>
               {% for st in students_map.get(u.email, []) %}
@@ -483,9 +587,8 @@
                   <input type="hidden" name="original_reg_no" value="{{ st.reg_no }}">
                   <td><input class="form-control" name="reg_no" value="{{ st.reg_no }}" required style="min-width:120px;"></td>
                   <td><input class="form-control" name="student_name" value="{{ st.student_name }}" required style="min-width:180px;"></td>
-                  <td><input class="form-control" name="department" value="{{ st.department or '' }}" style="min-width:110px;"></td>
+                  <td><input class="form-control" value="{{ u.department or st.department or '' }}" style="min-width:110px;" readonly></td>
                   <td><input class="form-control" name="parent_phone" value="{{ st.parent_phone or '' }}" style="min-width:130px;"></td>
-                  <td><input class="form-control" name="parent_email" value="{{ st.parent_email or '' }}" style="min-width:180px;"></td>
                   <td>
                     <div class="btn-group">
                       <button class="btn btn-primary btn-sm" title="Save"><i class="fas fa-save"></i></button>
@@ -500,7 +603,7 @@
               </tr>
               {% endfor %}
               {% if not students_map.get(u.email, []) %}
-              <tr><td colspan="6" class="text-center text-muted" style="padding:16px;">No students assigned yet.</td></tr>
+              <tr><td colspan="5" class="text-center text-muted" style="padding:16px;">No students assigned yet.</td></tr>
               {% endif %}
             </tbody>
           </table>
@@ -616,7 +719,7 @@
     <div class="table-wrapper">
       <table>
         <thead>
-          <tr><th>Test Name</th><th>Department</th><th>Year</th><th>Batch</th><th>Semester</th><th>Uploaded At</th></tr>
+          <tr><th>Test Name</th><th>Department</th><th>Year</th><th>Batch</th><th>Semester</th><th>Status</th><th>Uploaded At</th><th>Actions</th></tr>
         </thead>
         <tbody>
           {% for t in recent_report_tests %}
@@ -626,11 +729,38 @@
             <td>{{ t.year_level or 1 }}</td>
             <td>{{ t.batch_name or '—' }}</td>
             <td>{{ t.semester or '—' }}</td>
+            <td>
+              {% if t.is_blocked %}
+              <span class="badge badge-danger">Blocked</span>
+              {% else %}
+              <span class="badge badge-success">Open</span>
+              {% endif %}
+            </td>
             <td>{{ (t.uploaded_at or '')[:16] }}</td>
+            <td>
+              <div class="btn-group">
+                <button class="btn btn-outline btn-sm" onclick="openRecentTestViewModal('{{ t.id }}')" title="View Details">
+                  <i class="fas fa-eye"></i>
+                </button>
+                <button class="btn btn-outline btn-sm" onclick="openModal('recent-test-edit-{{ t.id }}')" title="Edit">
+                  <i class="fas fa-pen"></i>
+                </button>
+                <form method="POST" action="{{ url_for('api_delete_test', test_id=t.id) }}" style="display:inline"
+                      onsubmit="return confirm('Delete this test and all its marks?')">
+                  <button class="btn btn-danger btn-sm" title="Delete"><i class="fas fa-trash"></i></button>
+                </form>
+                <form method="POST" action="{{ url_for('api_toggle_test_block', test_id=t.id) }}" style="display:inline"
+                      onsubmit="return confirm('Update block status for this test?')">
+                  <button class="btn btn-warning btn-sm" title="{{ 'Unblock Test' if t.is_blocked else 'Block Test' }}">
+                    <i class="fas fa-{{ 'unlock' if t.is_blocked else 'ban' }}"></i>
+                  </button>
+                </form>
+              </div>
+            </td>
           </tr>
           {% endfor %}
           {% if not recent_report_tests %}
-          <tr><td colspan="6" class="text-center text-muted" style="padding:16px;">No recent uploads.</td></tr>
+          <tr><td colspan="8" class="text-center text-muted" style="padding:16px;">No recent uploads.</td></tr>
           {% endif %}
         </tbody>
       </table>
@@ -741,6 +871,12 @@
                     onsubmit="return confirm('Delete this test and all its marks?')">
                 <button class="btn btn-danger btn-sm" title="Delete"><i class="fas fa-trash"></i></button>
               </form>
+              <form method="POST" action="{{ url_for('api_toggle_test_block', test_id=t.id) }}" style="display:inline"
+                    onsubmit="return confirm('Update block status for this test?')">
+                <button class="btn btn-warning btn-sm" title="{{ 'Unblock Test' if t.is_blocked else 'Block Test' }}">
+                  <i class="fas fa-{{ 'unlock' if t.is_blocked else 'ban' }}"></i>
+                </button>
+              </form>
             </div>
           </td>
         </tr>
@@ -754,6 +890,81 @@
   {% endif %}
 
 </div>
+
+<!-- Recent Test Modals -->
+{% for t in recent_report_tests %}
+<div class="modal-overlay" id="modal-recent-test-view-{{ t.id }}">
+  <div class="modal" style="max-width:700px;">
+    <div class="modal-header">
+      <h3><i class="fas fa-clipboard-check"></i> {{ t.test_name or 'Test #' ~ t.id }}</h3>
+      <button class="modal-close" onclick="closeModal('recent-test-view-{{ t.id }}')">&times;</button>
+    </div>
+    <div class="test-details">
+      <p><strong>Batch:</strong> {{ t.batch_name or 'N/A' }}</p>
+      <p><strong>Semester:</strong> {{ t.semester or 'N/A' }}</p>
+      <p><strong>Year:</strong> {{ t.year_level or 1 }}</p>
+      <p><strong>Department:</strong> {{ t.department or 'N/A' }}</p>
+      <p><strong>Uploaded By:</strong> {{ t.uploaded_by_name or t.uploaded_by or 'Unknown' }}</p>
+      <p><strong>Uploaded At:</strong> {{ (t.uploaded_at or 'N/A')[:19] }}</p>
+      <p><strong>Students:</strong> {{ t.student_count or 0 }}</p>
+      <p><strong>Status:</strong>
+        {% if t.is_blocked %}
+        <span class="badge badge-danger">Blocked</span>
+        {% else %}
+        <span class="badge badge-success">Open</span>
+        {% endif %}
+      </p>
+      <hr class="divider">
+      <p><strong>Student Data:</strong></p>
+      <div id="recent-test-view-marks-{{ t.id }}" class="table-wrapper" style="max-height:280px;overflow:auto;">
+        <div style="padding:12px;color:var(--text-dim);font-size:.82rem;">Loading...</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-recent-test-edit-{{ t.id }}">
+  <div class="modal" style="max-width:640px;">
+    <div class="modal-header">
+      <h3><i class="fas fa-pen"></i> Edit Test</h3>
+      <button class="modal-close" onclick="closeModal('recent-test-edit-{{ t.id }}')">&times;</button>
+    </div>
+    <form method="POST" action="{{ url_for('api_update_test', test_id=t.id) }}">
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Test Name</label>
+          <input class="form-control" name="test_name" value="{{ t.test_name or '' }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Semester</label>
+          <input class="form-control" name="semester" value="{{ t.semester or '' }}">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Year</label>
+          <input class="form-control" value="{{ t.year_level or 1 }}" readonly>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Batch</label>
+          <input class="form-control" name="batch_name" value="{{ t.batch_name or '' }}">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Section</label>
+          <input class="form-control" name="section" value="{{ t.section or '' }}">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Department</label>
+          <input class="form-control" name="department" value="{{ t.department or '' }}" readonly>
+        </div>
+      </div>
+      <button class="btn btn-primary" type="submit"><i class="fas fa-save"></i> Save</button>
+    </form>
+  </div>
+</div>
+{% endfor %}
 
 <!-- Test View Modals -->
 {% for t in report_tests %}
@@ -1449,17 +1660,33 @@ function shouldIncludeMarkEntry(rawKey, rawValue) {
   return true;
 }
 
-function buildAdminMarksText(marks) {
-  if (!marks || typeof marks !== 'object') return 'No valid marks';
-  const filtered = Object.entries(marks).filter(([k, v]) => shouldIncludeMarkEntry(k, v));
-  if (!filtered.length) return 'No valid marks';
-  return filtered.map(([k, v]) => `${k}: ${v}`).join(' | ');
+function getAdminTestViewSubjects(students) {
+  const seen = new Set();
+  const subjects = [];
+
+  (students || []).forEach((student) => {
+    const marks = student?.marks || {};
+    Object.entries(marks).forEach(([rawKey, rawVal]) => {
+      if (!shouldIncludeMarkEntry(rawKey, rawVal)) return;
+      const key = String(rawKey || '').trim();
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      subjects.push(key);
+    });
+  });
+
+  return subjects;
 }
 
-function renderTestViewRows(students) {
-  return students.map((s) => {
-    const marksText = buildAdminMarksText(s.marks || {});
-    return `<tr><td><strong>${escapeHtml(s.reg_no || '')}</strong></td><td>${escapeHtml(marksText)}</td></tr>`;
+function renderTestViewRows(students, subjects) {
+  return (students || []).map((s) => {
+    const marks = s?.marks || {};
+    const cells = subjects.map((subject) => {
+      const value = Object.prototype.hasOwnProperty.call(marks, subject) ? marks[subject] : '-';
+      return `<td>${escapeHtml(String(value ?? '-'))}</td>`;
+    }).join('');
+
+    return `<tr><td><strong>${escapeHtml(s.reg_no || '')}</strong></td><td>${escapeHtml(s.department || '—')}</td>${cells}</tr>`;
   }).join('');
 }
 
@@ -1469,10 +1696,24 @@ function renderTestView(host, students) {
     return;
   }
 
-  const rows = renderTestViewRows(students);
+  const subjects = getAdminTestViewSubjects(students);
+  if (!subjects.length) {
+    host.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:.82rem;">No valid subject marks found.</div>';
+    return;
+  }
+
+  const subjectHeaders = subjects.map((s) => `<th>${escapeHtml(s)}</th>`).join('');
+  const rows = renderTestViewRows(students, subjects);
+
   host.innerHTML = `
     <table>
-      <thead><tr><th>Reg No</th><th>Marks</th></tr></thead>
+      <thead>
+        <tr>
+          <th>Reg No</th>
+          <th>Department</th>
+          ${subjectHeaders}
+        </tr>
+      </thead>
       <tbody>${rows}</tbody>
     </table>
   `;
@@ -1481,6 +1722,35 @@ function renderTestView(host, students) {
 async function openTestViewModal(testId) {
   openModal('test-view-' + testId);
   const host = document.getElementById('test-view-marks-' + testId);
+  if (!host) return;
+
+  if (TEST_VIEW_CACHE[testId]) {
+    renderTestView(host, TEST_VIEW_CACHE[testId]);
+    return;
+  }
+
+  host.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:.82rem;">Loading...</div>';
+
+  try {
+    const response = await fetch(`/api/tests/${testId}/marks`, { credentials: 'same-origin' });
+    const payload = await response.json();
+    if (!response.ok || !payload.success) {
+      host.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.82rem;">Unable to load student marks.</div>';
+      return;
+    }
+
+    const data = payload.data || {};
+    const students = data.students || [];
+    TEST_VIEW_CACHE[testId] = students;
+    renderTestView(host, students);
+  } catch (e) {
+    host.innerHTML = '<div style="padding:12px;color:var(--danger);font-size:.82rem;">Unable to load student marks.</div>';
+  }
+}
+
+async function openRecentTestViewModal(testId) {
+  openModal('recent-test-view-' + testId);
+  const host = document.getElementById('recent-test-view-marks-' + testId);
   if (!host) return;
 
   if (TEST_VIEW_CACHE[testId]) {
@@ -1534,16 +1804,19 @@ function toggleCreateUserFields() {
 
   if (deptEl) {
     deptEl.disabled = !isCounselor;
+    deptEl.required = isCounselor;
     if (!isCounselor) deptEl.value = '';
   }
 
   if (yearLevelEl) {
     yearLevelEl.disabled = !isCounselor;
+    yearLevelEl.required = isCounselor;
     if (!isCounselor) yearLevelEl.value = '1';
   }
 
   if (maxStudentsEl) {
     maxStudentsEl.disabled = !isCounselor;
+    maxStudentsEl.required = isCounselor;
     if (!isCounselor) maxStudentsEl.value = '500';
     else if (!maxStudentsEl.value) maxStudentsEl.value = '30';
   }
@@ -1566,9 +1839,7 @@ function toggleCreateUserFields() {
 function toggleEditUserFields(userIndex) {
   const idx = String(userIndex || '');
   const roleEl = document.getElementById(`editRole-${idx}`);
-  if (!roleEl) return;
-
-  const roleValue = roleEl.value || 'counselor';
+  const roleValue = roleEl ? (roleEl.value || 'counselor') : 'counselor';
   const isSystemAdminRole = roleValue === 'admin';
   const isChiefAdminRole = roleValue === 'chief_admin';
   const isCounselorRole = roleValue === 'counselor';
@@ -1589,16 +1860,19 @@ function toggleEditUserFields(userIndex) {
 
   if (departmentEl) {
     departmentEl.disabled = isSystemAdminRole;
+    departmentEl.required = isCounselorRole;
     if (isSystemAdminRole) departmentEl.value = '';
   }
 
   if (yearLevelEl) {
     yearLevelEl.disabled = !isCounselorRole;
+    yearLevelEl.required = isCounselorRole;
     if (!isCounselorRole) yearLevelEl.value = '1';
   }
 
   if (maxStudentsEl) {
     maxStudentsEl.disabled = !isCounselorRole;
+    maxStudentsEl.required = isCounselorRole;
     if (isSystemAdminRole || isChiefAdminRole) maxStudentsEl.value = '500';
     else if (!maxStudentsEl.value) maxStudentsEl.value = '30';
   }
@@ -1695,8 +1969,19 @@ function renderResetUserSuggestions() {
   panel.style.display = 'block';
   panel.innerHTML = matches.map((u) => {
     const label = `${u.name} (${u.email}) - ${u.role.charAt(0).toUpperCase() + u.role.slice(1)}`;
-    return `<button type="button" class="btn btn-outline btn-sm" style="display:block;width:100%;text-align:left;border:none;border-bottom:1px solid var(--border-light);border-radius:0;padding:10px 12px;" onclick="chooseResetUser(${JSON.stringify(u.email)}, ${JSON.stringify(label)})">${escapeHtml(label)}</button>`;
+    return `<button type="button" class="btn btn-outline btn-sm" style="display:block;width:100%;text-align:left;border:none;border-bottom:1px solid var(--border-light);border-radius:0;padding:10px 12px;cursor:pointer;" data-user-email="${u.email}" data-user-label="${label.replace(/"/g, '&quot;')}">${escapeHtml(label)}</button>`;
   }).join('');
+
+  // Attach click handlers to suggestion buttons
+  panel.querySelectorAll('button[data-user-email]').forEach((btn) => {
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const email = btn.getAttribute('data-user-email');
+      const label = btn.getAttribute('data-user-label');
+      chooseResetUser(email, label);
+    });
+  });
 
   // Auto-pick exact email match for quick keyboard flow.
   const exact = matches.find(u => u.email.toLowerCase() === q);
@@ -1756,6 +2041,17 @@ function reopenRequestedManageModal() {
 
   if (target) {
     target.classList.add('open');
+  }
+}
+
+function toggleStudentQuickAdd(idx) {
+  const quickAdd = document.getElementById(`quickAddStudent-${idx}`);
+  if (!quickAdd) return;
+  quickAdd.style.display = quickAdd.style.display === 'none' ? 'block' : 'none';
+  // Autofocus first input after showing
+  if (quickAdd.style.display !== 'none') {
+    const firstInput = quickAdd.querySelector('input[name="reg_no"]');
+    if (firstInput) setTimeout(() => firstInput.focus(), 100);
   }
 }
 

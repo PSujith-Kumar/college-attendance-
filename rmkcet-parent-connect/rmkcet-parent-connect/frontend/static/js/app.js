@@ -54,11 +54,40 @@ document.addEventListener('DOMContentLoaded', () => {
   // Mobile sidebar toggle
   const sidebar = document.getElementById('sidebar');
   const mToggle = document.getElementById('mobileToggle');
+  const sidebarClose = document.getElementById('sidebarClose');
+
+  function closeSidebar() {
+    if (sidebar) sidebar.classList.remove('open');
+  }
+
   if (mToggle) {
     mToggle.addEventListener('click', () => {
       sidebar.classList.toggle('open');
     });
   }
+
+  if (sidebarClose) {
+    sidebarClose.addEventListener('click', closeSidebar);
+  }
+
+  if (sidebar) {
+    sidebar.querySelectorAll('.nav-link').forEach((link) => {
+      link.addEventListener('click', () => {
+        if (window.innerWidth <= 768) {
+          closeSidebar();
+        }
+      });
+    });
+  }
+
+  document.addEventListener('click', (e) => {
+    if (!sidebar || window.innerWidth > 768) return;
+    const clickedInsideSidebar = sidebar.contains(e.target);
+    const clickedToggle = mToggle && mToggle.contains(e.target);
+    if (sidebar.classList.contains('open') && !clickedInsideSidebar && !clickedToggle) {
+      closeSidebar();
+    }
+  });
 
   const themeToggle = document.getElementById('themeToggle');
   const themeIcon = document.getElementById('themeToggleIcon');
@@ -253,7 +282,19 @@ function initializeUserTableState() {
 
 // Chief admin password reset modal
 function openPasswordResetModal() {
-  openModal('password-reset');
+  // Determine if user is chief admin or system admin based on visible button
+  const headerActions = document.querySelector('.header-actions');
+  const isCorePasswordBtn = headerActions?.querySelector('a[href*="tab=config"]') !== null;
+  const isChiefCredentialBtn = headerActions?.querySelector('button[onclick*="openPasswordResetModal"]') !== null;
+  
+  if (isChiefCredentialBtn && !isCorePasswordBtn) {
+    // Chief admin role - open credential reset for counselors
+    openModal('chief-credential-reset');
+    initializeChiefResetCounselors();
+  } else {
+    // Regular user role - open own password change
+    openModal('password-reset');
+  }
 }
 
 // Show/hide password input
@@ -271,6 +312,138 @@ function togglePasswordInput(inputId, iconId) {
     icon.classList.remove('fa-eye-slash');
     icon.classList.add('fa-eye');
   }
+}
+
+// Chief Admin Credential Reset
+let CHIEF_RESET_COUNSELORS = [];
+
+function initializeChiefResetCounselors() {
+  // Fetch scoped counselors from the API
+  fetch('/api/chief-admin/scoped-counselors')
+    .then(r => {
+      if (!r.ok) throw new Error('Failed to fetch counselors');
+      return r.json();
+    })
+    .then(data => {
+      CHIEF_RESET_COUNSELORS = Array.isArray(data) ? data : [];
+    })
+    .catch(e => {
+      console.error('Error fetching scoped counselors:', e);
+      CHIEF_RESET_COUNSELORS = [];
+    });
+  
+  // Clear previous search
+  const searchInput = document.getElementById('chiefResetSearch');
+  if (searchInput) {
+    searchInput.value = '';
+    setTimeout(() => searchInput.focus(), 100);
+  }
+  const selectedEmail = document.getElementById('chiefResetSelectedEmail');
+  if (selectedEmail) selectedEmail.value = '';
+  const pickedText = document.getElementById('chiefResetPicked');
+  if (pickedText) pickedText.textContent = '';
+}
+
+function renderChiefResetSuggestions() {
+  const input = document.getElementById('chiefResetSearch');
+  const panel = document.getElementById('chiefResetSuggestions');
+  const selectedEmail = document.getElementById('chiefResetSelectedEmail');
+  const pickedText = document.getElementById('chiefResetPicked');
+  
+  if (!input || !panel || !selectedEmail || !pickedText) return;
+
+  const q = (input.value || '').trim().toLowerCase();
+  if (!q) {
+    panel.style.display = 'none';
+    selectedEmail.value = '';
+    pickedText.textContent = '';
+    return;
+  }
+
+  const matches = CHIEF_RESET_COUNSELORS
+    .filter(u => `${u.name} ${u.email} ${u.department}`.toLowerCase().includes(q))
+    .slice(0, 20);
+
+  if (!matches.length) {
+    panel.style.display = 'block';
+    panel.innerHTML = '<div style="padding:10px 12px;color:var(--text-dim);font-size:.85rem;">No matching counselors in your scope.</div>';
+    selectedEmail.value = '';
+    pickedText.textContent = '';
+    return;
+  }
+
+  panel.style.display = 'block';
+  panel.innerHTML = matches.map((u) => {
+    const label = `${u.name} (${u.email}) - ${u.department} Y${u.year_level}`;
+    return `<button type="button" class="btn btn-outline btn-sm" style="display:block;width:100%;text-align:left;border:none;border-bottom:1px solid var(--border-light);border-radius:0;padding:10px 12px;cursor:pointer;" data-user-email="${u.email}" data-user-label="${label.replace(/"/g, '&quot;')}">${escapeHtmlInner(label)}</button>`;
+  }).join('');
+
+  // Attach click handlers to suggestion buttons
+  panel.querySelectorAll('button[data-user-email]').forEach((btn) => {
+    btn.addEventListener('mousedown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const email = btn.getAttribute('data-user-email');
+      const label = btn.getAttribute('data-user-label');
+      chooseChiefResetUser(email, label);
+    });
+  });
+
+  // Auto-pick exact email match
+  const exact = matches.find(u => u.email.toLowerCase() === q);
+  if (exact) {
+    const label = `${exact.name} (${exact.email}) - ${exact.department} Y${exact.year_level}`;
+    chooseChiefResetUser(exact.email, label, true);
+  } else {
+    selectedEmail.value = '';
+    pickedText.textContent = '';
+  }
+}
+
+function escapeHtmlInner(str) {
+  return String(str)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+function chooseChiefResetUser(email, label, keepOpen) {
+  const input = document.getElementById('chiefResetSearch');
+  const panel = document.getElementById('chiefResetSuggestions');
+  const selectedEmail = document.getElementById('chiefResetSelectedEmail');
+  const pickedText = document.getElementById('chiefResetPicked');
+  
+  if (!input || !panel || !selectedEmail || !pickedText) return;
+
+  input.value = label;
+  selectedEmail.value = email;
+  pickedText.textContent = `Selected: ${label}`;
+  if (!keepOpen) panel.style.display = 'none';
+}
+
+function validateChiefResetSelection() {
+  const selectedEmail = document.getElementById('chiefResetSelectedEmail');
+  const newPwd = document.getElementById('chiefResetNewPassword');
+  const confirmPwd = document.getElementById('chiefResetConfirmPassword');
+  
+  if (!selectedEmail || !selectedEmail.value) {
+    alert('Please select a counselor from the suggested list.');
+    return false;
+  }
+  
+  if (!newPwd || !confirmPwd || newPwd.value !== confirmPwd.value) {
+    alert('Passwords do not match.');
+    return false;
+  }
+  
+  if (newPwd.value.length < 6) {
+    alert('Password must be at least 6 characters.');
+    return false;
+  }
+  
+  return true;
 }
 
 // Chief Admin Department-Year Assignment

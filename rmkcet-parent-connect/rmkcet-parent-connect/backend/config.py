@@ -77,7 +77,7 @@ ALLOWED_EMAIL_DOMAINS = ["rmkcet.ac.in", "rmkec.ac.in", "gmail.com"]
 
 # === WhatsApp ===
 COUNTRY_CODE = os.getenv("COUNTRY_CODE", "91")
-WHATSAPP_BASE_URL = "https://wa.me/"
+WHATSAPP_BASE_URL = "whatsapp://send?phone="
 
 # === Feature Toggles ===
 ENABLE_REGISTRATION = False

@@ -159,6 +159,7 @@ def init_database():
         department TEXT,
         section TEXT,
         file_hash TEXT,
+        is_blocked INTEGER DEFAULT 0,
         academic_year TEXT,
         subjects TEXT,
         subject_columns TEXT,
@@ -255,6 +256,7 @@ def init_database():
     ensure_test_metadata_columns()
     ensure_chief_admin_scopes_table()
     ensure_counselor_mark_overrides_table()
+    ensure_counselor_student_departments()
     return True
 
 
@@ -361,7 +363,7 @@ def set_chief_admin_scopes(chief_admin_email, scopes):
 
 
 def get_scoped_users_for_admin(actor_email, actor_role):
-    """System admin sees all users; chief admin sees counselors in allowed dept/year plus self."""
+    """System admin sees all users; chief admin sees counselors in allowed dept/year, other chief admins with matching scopes, plus self."""
     if is_system_admin(actor_role):
         return get_all_users()
 
@@ -384,11 +386,21 @@ def get_scoped_users_for_admin(actor_email, actor_role):
         if d.get("email") == actor_email:
             filtered.append(d)
             continue
-        if d.get("role") != "counselor":
+        
+        # Include counselors in allowed scopes
+        if d.get("role") == "counselor":
+            key = (str(d.get("department") or "").strip().upper(), int(d.get("year_level") or 1))
+            if key in allowed:
+                filtered.append(d)
             continue
-        key = (str(d.get("department") or "").strip().upper(), int(d.get("year_level") or 1))
-        if key in allowed:
-            filtered.append(d)
+        
+        # Include other chief admins if they have ANY scope overlap with current chief admin
+        if d.get("role") == "chief_admin":
+            other_scopes = get_chief_admin_scopes(d.get("email"))
+            other_allowed = {(s["department"], int(s["year_level"])) for s in other_scopes}
+            if allowed & other_allowed:  # Check for scope intersection
+                filtered.append(d)
+    
     return filtered
 
 
@@ -1014,6 +1026,7 @@ def get_all_unique_tests(filter_batch=None, filter_semester=None, filter_dept=No
         SELECT t.id, t.test_name as t_name, t.test_date,
                tm.id as tm_id, tm.test_id, tm.test_name, tm.batch_name, tm.semester,
                          tm.department, tm.section, tm.year_level, tm.uploaded_at, tm.uploaded_by, tm.subjects,
+               COALESCE(tm.is_blocked, 0) as is_blocked,
                u.name as uploaded_by_name,
                (SELECT COUNT(DISTINCT sm.reg_no) FROM student_marks sm WHERE sm.test_id = t.id) as student_count,
                0 as is_duplicate
@@ -1437,12 +1450,12 @@ def get_tests():
 def save_test_metadata(test_id, metadata: dict):
     conn = get_conn()
     conn.execute("""INSERT OR REPLACE INTO test_metadata
-                                        (test_id, batch_name, semester, year_level, test_name, department, section, file_hash, academic_year,
+                                        (test_id, batch_name, semester, year_level, test_name, department, section, file_hash, is_blocked, academic_year,
                      subjects, subject_columns, header_row, data_start_row, uploaded_at, uploaded_by)
-                                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                  (test_id, metadata.get("batch_name"), metadata.get("semester"), metadata.get("year_level", 1),
                   metadata.get("test_name"), metadata.get("department"),
-                                    metadata.get("section"), metadata.get("file_hash"),
+                                    metadata.get("section"), metadata.get("file_hash"), int(metadata.get("is_blocked") or 0),
                   metadata.get("academic_year"), json.dumps(metadata.get("subjects", [])),
                   json.dumps(metadata.get("subject_columns", {})),
                   metadata.get("header_row"), metadata.get("data_start_row", 7),
@@ -1929,6 +1942,7 @@ def get_visible_tests_for_counselor(counselor_email):
                COALESCE(tm.year_level, 1) AS year_level,
                COALESCE(tm.batch_name, '') AS batch_name,
                COALESCE(tm.section, '') AS section,
+               COALESCE(tm.is_blocked, 0) AS is_blocked,
                tm.uploaded_at,
                (SELECT COUNT(DISTINCT sm.reg_no)
                    FROM student_marks sm
@@ -2406,6 +2420,13 @@ def ensure_test_metadata_columns():
         conn.execute("ALTER TABLE test_metadata ADD COLUMN year_level INTEGER DEFAULT 1")
         conn.execute("UPDATE test_metadata SET year_level=1 WHERE year_level IS NULL")
         conn.commit()
+
+    try:
+        conn.execute("SELECT is_blocked FROM test_metadata LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE test_metadata ADD COLUMN is_blocked INTEGER DEFAULT 0")
+        conn.execute("UPDATE test_metadata SET is_blocked=0 WHERE is_blocked IS NULL")
+        conn.commit()
     conn.close()
 
 
@@ -2459,6 +2480,34 @@ def ensure_counselor_mark_overrides_table():
             UNIQUE(counselor_email, test_id, reg_no, subject_name)
         )
         """
+    )
+    conn.commit()
+    conn.close()
+
+
+def ensure_counselor_student_departments():
+    """Backfill missing/empty student department from counselor account department."""
+    conn = get_conn()
+    conn.execute(
+        """
+        UPDATE counselor_students
+        SET department = (
+            SELECT UPPER(COALESCE(users.department, ''))
+            FROM users
+            WHERE users.email = counselor_students.counselor_email
+        )
+        WHERE COALESCE(TRIM(department), '') = ''
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_test_block_status(test_id, is_blocked):
+    conn = get_conn()
+    conn.execute(
+        "UPDATE test_metadata SET is_blocked=? WHERE test_id=?",
+        (1 if int(is_blocked) else 0, int(test_id)),
     )
     conn.commit()
     conn.close()

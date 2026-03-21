@@ -31,6 +31,8 @@ from config import (
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.join(os.path.dirname(BASE_DIR), "frontend")
+FRONTEND_ASSETS_DIR = os.path.join(FRONTEND_DIR, "assets")
+STATIC_ASSETS_DIR = os.path.join(FRONTEND_DIR, "static", "assets")
 
 app = Flask(
     __name__,
@@ -124,11 +126,23 @@ def _get_actor_scope_pairs(actor_email, actor_role):
 def _can_chief_admin_touch_user(actor_email, target_user):
     if not target_user:
         return False
-    if target_user.get("role") != "counselor":
-        return False
-    scopes = _get_actor_scope_pairs(actor_email, "chief_admin") or set()
-    key = (str(target_user.get("department") or "").upper(), int(target_user.get("year_level") or 1))
-    return key in scopes
+    
+    target_role = target_user.get("role")
+    
+    # Chief admin can manage counselors in their scope
+    if target_role == "counselor":
+        scopes = _get_actor_scope_pairs(actor_email, "chief_admin") or set()
+        key = (str(target_user.get("department") or "").upper(), int(target_user.get("year_level") or 1))
+        return key in scopes
+    
+    # Chief admin can manage other chief admins if they have scope overlap
+    if target_role == "chief_admin":
+        actor_scopes = _get_actor_scope_pairs(actor_email, "chief_admin") or set()
+        target_scopes = db.get_chief_admin_scopes(target_user.get("email"))
+        target_scopes_set = {(str(s.get("department") or "").upper(), int(s.get("year_level") or 1)) for s in target_scopes}
+        return bool(actor_scopes & target_scopes_set)  # Check for scope intersection
+    
+    return False
 
 
 def _get_allowed_counselor_emails_for_actor(actor_email, actor_role):
@@ -211,6 +225,14 @@ def _message_export_filename(ext):
     return f"message_activity_{stamp}.{ext}"
 
 
+def _resolve_asset_file(filename):
+    for root in (FRONTEND_ASSETS_DIR, STATIC_ASSETS_DIR):
+        candidate = os.path.join(root, filename)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Context processor – inject common vars into every template
 # ---------------------------------------------------------------------------
@@ -224,6 +246,45 @@ def inject_globals():
         "current_role": session.get("role"),
         "now": datetime.now(),
     }
+
+
+@app.route("/documentation/download", methods=["GET"])
+@login_required
+def download_role_documentation():
+    role = str(session.get("role") or "counselor").strip().lower()
+    doc_map = {
+        "admin": "doc_admin.pdf",
+        "chief_admin": "doc_chief_admin.pdf",
+        "counselor": "doc_counsellor.pdf",
+    }
+    filename = doc_map.get(role, "doc_counsellor.pdf")
+    target = _resolve_asset_file(filename)
+    if not target:
+        flash("Documentation file is not available yet.", "error")
+        return redirect(request.referrer or url_for("index"))
+    return send_file(target, as_attachment=True, download_name=filename)
+
+
+@app.route("/support/templates/student", methods=["GET"])
+@login_required
+def download_student_template():
+    filename = "student.xlsx"
+    target = _resolve_asset_file(filename)
+    if not target:
+        flash("Student template is not available yet.", "error")
+        return redirect(request.referrer or url_for("index"))
+    return send_file(target, as_attachment=True, download_name=filename)
+
+
+@app.route("/support/templates/marksheet", methods=["GET"])
+@login_required
+def download_marksheet_template():
+    filename = "marksheet.xlsx"
+    target = _resolve_asset_file(filename)
+    if not target:
+        flash("Marksheet template is not available yet.", "error")
+        return redirect(request.referrer or url_for("index"))
+    return send_file(target, as_attachment=True, download_name=filename)
 
 
 def _normalize_metric_key(key):
@@ -248,13 +309,15 @@ def _is_absent_mark(value):
     return s in {"absent", "ab", "a", "na", "-", "not attended"}
 
 
-def _build_parent_subjects_table(marks):
-    """Build standardized marks block and ignore unknown/non-academic fields."""
+def _build_parent_subjects_table(marks, ordered_fields=None):
+    """Build standardized marks block with optional caller-defined ordering."""
     if not isinstance(marks, dict):
         return ""
 
-    attendance = None
-    gpa = None
+    attendance_values = []
+    gpa_values = []
+    failed_values = []
+    not_attended_values = []
     subject_rows = []
 
     attendance_keys = {"attendance", "att"}
@@ -278,26 +341,92 @@ def _build_parent_subjects_table(marks):
             continue
 
         if key_norm in attendance_keys:
-            attendance = value
+            attendance_values.append(value)
             continue
         if key_norm in gpa_keys:
-            gpa = value
+            gpa_values.append(value)
             continue
         if key_norm in failed_keys:
+            failed_values.append(value)
             continue
         if key_norm in not_attended_keys:
+            not_attended_values.append(value)
             continue
 
         subject_rows.append((str(raw_key).strip(), value))
 
+    metric_values = {
+        "attendance": attendance_values,
+        "failed_subjects": failed_values,
+        "not_attended": not_attended_values,
+        "gpa": gpa_values,
+    }
+    metric_labels = {
+        "attendance": "Attendance",
+        "failed_subjects": "Failed Subjects",
+        "not_attended": "Not Attended",
+        "gpa": "GPA",
+    }
+
+    used_subject_idx = set()
+    ordered_lines = []
+
+    def _pop_metric(metric_key):
+        values = metric_values.get(metric_key) or []
+        if not values:
+            return None
+        return values.pop(0)
+
+    def _match_subject(raw_key, normalized_key):
+        raw_key = str(raw_key or "").strip().lower()
+        normalized_key = str(normalized_key or "").strip().lower()
+        for idx, (label, value) in enumerate(subject_rows):
+            if idx in used_subject_idx:
+                continue
+            label_norm = _normalize_metric_key(label)
+            if raw_key and label.lower() == raw_key:
+                used_subject_idx.add(idx)
+                return label, value
+            if normalized_key and label_norm == normalized_key:
+                used_subject_idx.add(idx)
+                return label, value
+        return None
+
+    if isinstance(ordered_fields, list):
+        for item in ordered_fields:
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type == "metric":
+                metric_key = str(item.get("key") or "").strip().lower()
+                value = _pop_metric(metric_key)
+                if value is not None:
+                    ordered_lines.append(f"{metric_labels.get(metric_key, metric_key)} : {value}")
+            elif item_type == "subject":
+                subject = _match_subject(item.get("raw_key"), item.get("normalized_key"))
+                if subject:
+                    ordered_lines.append(f"{subject[0]} : {subject[1]}")
+
+    if isinstance(ordered_fields, list):
+        for idx, (subject, value) in enumerate(subject_rows):
+            if idx not in used_subject_idx:
+                ordered_lines.append(f"{subject} : {value}")
+
+        for key in ("attendance", "failed_subjects", "not_attended", "gpa"):
+            values = metric_values.get(key) or []
+            for value in values:
+                ordered_lines.append(f"{metric_labels[key]} : {value}")
+    else:
+        for value in attendance_values:
+            ordered_lines.append(f"{metric_labels['attendance']} : {value}")
+        for subject, value in subject_rows:
+            ordered_lines.append(f"{subject} : {value}")
+        for key in ("failed_subjects", "not_attended", "gpa"):
+            for value in metric_values.get(key) or []:
+                ordered_lines.append(f"{metric_labels[key]} : {value}")
+
     lines = []
-    if attendance:
-        lines.append(f"Attendance :\t{attendance}")
-        lines.append("")
-    for subject, value in subject_rows:
-        lines.append(f"{subject} :\t{value}")
-    if gpa:
-        lines.append(f"GPA :\t{gpa}")
+    lines.extend(ordered_lines)
 
     return "\n".join(lines)
 
@@ -935,6 +1064,9 @@ def api_update_user(email):
             updates["can_upload_students"] = 1
         else:
             department = (request.form.get("department") or "").strip().upper()
+            if not department:
+                flash("Department is required for counselor accounts.", "error")
+                return _redirect_admin_back("users")
             year_level = request.form.get("year_level", type=int)
             if year_level not in (1, 2, 3, 4):
                 flash("Year must be between 1 and 4.", "error")
@@ -1173,6 +1305,88 @@ def api_admin_reset_password():
     return redirect(url_for("admin", tab="config"))
 
 
+@app.route("/api/chief-admin/reset-counselor-password", methods=["POST"])
+@login_required
+@admin_required
+def api_chief_admin_reset_password():
+    """Chief admin can reset password for counselors in their assigned dept/year scope."""
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    
+    if not _is_chief_admin(actor_role):
+        flash("Only chief admins can access this function.", "error")
+        return redirect(url_for("counselor_page"))
+    
+    target_email = request.form.get("target_email", "").strip()
+    new_password = request.form.get("new_password", "")
+    confirm_password = request.form.get("confirm_password", "")
+    force_logout = request.form.get("force_logout") == "on"
+
+    if not target_email or not new_password or not confirm_password:
+        flash("Counselor and both password fields are required.", "error")
+        return redirect(url_for("counselor_page"))
+
+    if new_password != confirm_password:
+        flash("New password and confirm password do not match.", "error")
+        return redirect(url_for("counselor_page"))
+
+    if len(new_password) < 6:
+        flash("Password must be at least 6 characters.", "error")
+        return redirect(url_for("counselor_page"))
+
+    target = db.get_user(target_email)
+    if not target:
+        flash("Selected user was not found.", "error")
+        return redirect(url_for("counselor_page"))
+    
+    if target.get("role") != "counselor":
+        flash("You can reset passwords only for counselors.", "error")
+        return redirect(url_for("counselor_page"))
+
+    # Chief admin must be able to manage this counselor's department/year
+    if not _can_chief_admin_touch_user(actor_email, target):
+        flash("You can reset passwords only for counselors in your assigned scope.", "error")
+        return redirect(url_for("counselor_page"))
+
+    db.update_user(target_email, password=new_password)
+
+    # Security best-practice: invalidate existing sessions after password reset.
+    if force_logout and target_email != session.get("user_email"):
+        db.force_logout_user(target_email, "chief_admin_password_reset")
+
+    flash(f"Password updated successfully for {target_email}.", "success")
+    return redirect(url_for("counselor_page"))
+
+
+@app.route("/api/chief-admin/scoped-counselors", methods=["GET"])
+@login_required
+@admin_required
+def api_chief_admin_get_scoped_counselors():
+    """Return list of counselors under chief admin's dept/year scope as JSON."""
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    
+    if not _is_chief_admin(actor_role):
+        return jsonify({"error": "Unauthorized"}), 403
+    
+    # Get all users scoped to this chief admin
+    all_scoped_users = db.get_scoped_users_for_admin(actor_email, actor_role) or []
+    
+    # Filter to only counselors
+    counselors = [
+        {
+            "name": u.get("name", ""),
+            "email": u.get("email", ""),
+            "department": u.get("department", ""),
+            "year_level": u.get("year_level", 1)
+        }
+        for u in all_scoped_users
+        if u.get("role") == "counselor"
+    ]
+    
+    return jsonify(counselors)
+
+
 @app.route("/api/admin/students/save", methods=["POST"])
 @login_required
 @admin_required
@@ -1181,7 +1395,6 @@ def api_admin_save_student():
     original_reg_no = request.form.get("original_reg_no", "").strip()
     reg_no = request.form.get("reg_no", "").strip()
     student_name = request.form.get("student_name", "").strip()
-    department = request.form.get("department", "").strip()
     parent_phone = request.form.get("parent_phone", "").strip()
     parent_email = request.form.get("parent_email", "").strip()
 
@@ -1193,6 +1406,8 @@ def api_admin_save_student():
     if not counselor or counselor.get("role") != "counselor":
         flash("Invalid counselor selected.", "error")
         return _redirect_admin_back("users")
+
+    department = (counselor.get("department") or "").strip().upper()
 
     try:
         if original_reg_no and original_reg_no != reg_no:
@@ -1632,18 +1847,50 @@ def api_update_test(test_id):
         if not _can_manage_department_year(actor_email, actor_role, meta.get("department"), meta.get("year_level") or 1):
             flash("You can manage tests only in your assigned department/year scope.", "error")
             return _redirect_admin_back("reports")
+        test_name = (request.form.get("test_name") or "").strip() or (meta.get("test_name") or "")
+        semester = (request.form.get("semester") or "").strip() or (meta.get("semester") or "")
+        department = (request.form.get("department") or "").strip() or (meta.get("department") or "")
+        batch_name = (request.form.get("batch_name") or "").strip() or (meta.get("batch_name") or "")
+        section = (request.form.get("section") or "").strip() or (meta.get("section") or "")
+
         db.update_test_metadata_fields(
             test_id,
-            test_name=request.form.get("test_name", "").strip(),
-            semester=request.form.get("semester", "").strip(),
-            department=request.form.get("department", "").strip(),
-            batch_name=request.form.get("batch_name", "").strip(),
-            section=request.form.get("section", "").strip(),
+            test_name=test_name,
+            semester=semester,
+            department=department,
+            batch_name=batch_name,
+            section=section,
         )
         flash("Test updated successfully.", "success")
     except Exception as e:
         flash(f"Failed to update test: {e}", "error")
     return _redirect_admin_back("reports")
+
+
+@app.route("/api/tests/<int:test_id>/toggle-block", methods=["POST"])
+@login_required
+@admin_required
+def api_toggle_test_block(test_id):
+    actor_email = session.get("user_email")
+    actor_role = session.get("role")
+    meta = db.get_test_metadata(test_id) or {}
+    if not meta:
+        flash("Test not found.", "error")
+        return _redirect_admin_back("reports")
+
+    if not _can_manage_department_year(actor_email, actor_role, meta.get("department"), meta.get("year_level") or 1):
+        flash("You can manage tests only in your assigned department/year scope.", "error")
+        return _redirect_admin_back("reports")
+
+    current = int(meta.get("is_blocked") or 0)
+    next_value = 0 if current else 1
+    db.update_test_block_status(test_id, next_value)
+    flash("Test blocked." if next_value else "Test unblocked.", "success")
+    return _redirect_admin_back(
+        "reports",
+        report_dept=(meta.get("department") or "").strip().upper(),
+        report_year=int(meta.get("year_level") or 1),
+    )
 
 
 @app.route("/api/admin/tests/upload", methods=["POST"])
@@ -1744,14 +1991,23 @@ def api_counselor_update_test(test_id):
     if not _can_access_test_for_user(test_id, email, role):
         flash("Access denied for this test.", "error")
         return redirect(url_for("counselor_page", tab="test-database"))
+    if _is_test_blocked(test_id):
+        flash("This test is blocked by administration. Editing is disabled.", "warning")
+        return redirect(url_for("counselor_page", tab="test-database"))
 
     try:
+        meta = db.get_test_metadata(test_id) or {}
+        test_name = (request.form.get("test_name") or "").strip() or (meta.get("test_name") or "")
+        semester = (request.form.get("semester") or "").strip() or (meta.get("semester") or "")
+        batch_name = (request.form.get("batch_name") or "").strip() or (meta.get("batch_name") or "")
+        section = (request.form.get("section") or "").strip() or (meta.get("section") or "")
+
         db.update_test_metadata_fields(
             test_id,
-            test_name=request.form.get("test_name", "").strip(),
-            semester=request.form.get("semester", "").strip(),
-            batch_name=request.form.get("batch_name", "").strip(),
-            section=request.form.get("section", "").strip(),
+            test_name=test_name,
+            semester=semester,
+            batch_name=batch_name,
+            section=section,
         )
         flash("Test details updated.", "success")
     except Exception as e:
@@ -1769,6 +2025,8 @@ def api_get_test_marks(test_id):
         role = session.get("role")
         if not _can_access_test_for_user(test_id, user_email, role):
             return jsonify({"success": False, "error": "Access denied for this test."}), 403
+        if role == "counselor" and _is_test_blocked(test_id):
+            return jsonify({"success": False, "error": "This test is blocked by administration."}), 403
 
         if role == "counselor":
             data = db.get_test_marks_grouped_for_counselor(test_id, user_email)
@@ -1788,6 +2046,8 @@ def api_counselor_update_marks(test_id):
         return jsonify({"success": False, "error": "Counselor access required."}), 403
     if not _can_access_test_for_user(test_id, email, role):
         return jsonify({"success": False, "error": "Access denied."}), 403
+    if _is_test_blocked(test_id):
+        return jsonify({"success": False, "error": "This test is blocked by administration."}), 403
     if _is_counselor_department_blocked(email, role):
         return jsonify({"success": False, "error": "Department is blocked. Editing disabled."}), 403
 
@@ -2038,6 +2298,11 @@ def _can_access_test_for_user(test_id: int, user_email: str, role: str) -> bool:
     return test_id in allowed_ids
 
 
+def _is_test_blocked(test_id: int) -> bool:
+    meta = db.get_test_metadata(test_id) or {}
+    return bool(int(meta.get("is_blocked") or 0))
+
+
 @app.route("/counselor/tests/<int:test_id>/view")
 @login_required
 def counselor_test_view_page(test_id):
@@ -2045,6 +2310,9 @@ def counselor_test_view_page(test_id):
     role = session.get("role", "counselor")
     if not _can_access_test_for_user(test_id, email, role):
         flash("Access denied for this test.", "error")
+        return redirect(url_for("counselor_page", tab="test-database"))
+    if _is_test_blocked(test_id):
+        flash("This test is blocked by administration. Viewing is disabled.", "warning")
         return redirect(url_for("counselor_page", tab="test-database"))
     if _is_counselor_department_blocked(email, role):
         flash("Your department is blocked. Contact system admin.", "warning")
@@ -2080,6 +2348,9 @@ def counselor_test_send_page(test_id):
     role = session.get("role", "counselor")
     if not _can_access_test_for_user(test_id, email, role):
         flash("Access denied for this test.", "error")
+        return redirect(url_for("counselor_page", tab="test-database"))
+    if _is_test_blocked(test_id):
+        flash("This test is blocked by administration. Sending is disabled.", "warning")
         return redirect(url_for("counselor_page", tab="test-database"))
     if _is_counselor_department_blocked(email, role):
         flash("Your department is blocked. Sending is disabled.", "warning")
@@ -2119,6 +2390,7 @@ def counselor_test_send_page(test_id):
         test_id=test_id,
         test_meta=test_meta,
         rows=rows,
+        country_code=COUNTRY_CODE,
     )
 
 
@@ -2131,6 +2403,16 @@ def api_send_single_report():
     reg_no = request.form.get("reg_no", "").strip()
     action = request.form.get("action", "cancel")
     is_ajax = request.form.get("ajax") == "1"
+    ordered_fields_raw = request.form.get("ordered_fields", "").strip()
+
+    ordered_fields = None
+    if ordered_fields_raw:
+        try:
+            parsed = json.loads(ordered_fields_raw)
+            if isinstance(parsed, list):
+                ordered_fields = parsed
+        except Exception:
+            ordered_fields = None
 
     if not test_id or not reg_no:
         flash("Test and student are required.", "error")
@@ -2138,6 +2420,11 @@ def api_send_single_report():
 
     if not _can_access_test_for_user(test_id, email, role):
         flash("Access denied for this test.", "error")
+        return redirect(url_for("counselor_page", tab="test-database"))
+    if _is_test_blocked(test_id):
+        flash("This test is blocked by administration. Sending is disabled.", "warning")
+        if is_ajax:
+            return jsonify({"success": False, "error": "Test is blocked."}), 403
         return redirect(url_for("counselor_page", tab="test-database"))
     if _is_counselor_department_blocked(email, role):
         flash("Your department is blocked. Sending is disabled.", "warning")
@@ -2187,7 +2474,7 @@ def api_send_single_report():
         "RMKCET"
     )
 
-    marks_table = _build_parent_subjects_table(marks)
+    marks_table = _build_parent_subjects_table(marks, ordered_fields=ordered_fields)
     effective_test_name = request.form.get("test_name") or (test_meta.get("test_name") or "Unit Test")
     if request.form.get("message_template", "").strip():
         msg = TemplateEngine.fill_template(
@@ -2285,6 +2572,10 @@ def api_generate_reports():
     test_id = int(test_id)
     user = db.get_user(email)
     test_meta = db.get_test_metadata(test_id)
+
+    if _is_test_blocked(test_id):
+        flash("This test is blocked by administration. Sending is disabled.", "warning")
+        return redirect(url_for("counselor_page", tab="test-database", test_id=test_id))
 
     # Keep metadata editable before send
     if edited_test_name or edited_semester or edited_department or edited_batch:

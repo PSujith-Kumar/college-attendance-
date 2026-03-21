@@ -80,7 +80,9 @@
           <td>{{ t.section or '—' }}</td>
           <td>{{ total }}</td>
           <td>
-            {% if generated > 0 %}
+            {% if t.is_blocked %}
+            <span class="badge badge-danger">Blocked By Admin</span>
+            {% elif generated > 0 %}
             <span class="badge badge-success">Generated: {{ generated }}</span>
             {% else %}
             <span class="badge badge-warning">Pending</span>
@@ -88,13 +90,13 @@
           </td>
           <td>
             <div class="btn-group">
-              <a class="btn btn-outline btn-sm" href="{{ url_for('counselor_test_view_page', test_id=t.id) }}">
+              <a class="btn btn-outline btn-sm {% if is_blocked_department or t.is_blocked %}disabled{% endif %}" {% if not (is_blocked_department or t.is_blocked) %}href="{{ url_for('counselor_test_view_page', test_id=t.id) }}"{% else %}onclick="return false;"{% endif %}>
                 <i class="fas fa-eye"></i> View
               </a>
-              <button class="btn btn-outline btn-sm" onclick="openModal('test-edit-{{ t.id }}')" {% if is_blocked_department %}disabled{% endif %}>
+              <button class="btn btn-outline btn-sm" onclick="openModal('test-edit-{{ t.id }}')" {% if is_blocked_department or t.is_blocked %}disabled{% endif %}>
                 <i class="fas fa-pen"></i> Edit
               </button>
-              <a class="btn btn-primary btn-sm {% if is_blocked_department %}disabled{% endif %}" href="{{ url_for('counselor_test_send_page', test_id=t.id) }}">
+              <a class="btn btn-primary btn-sm {% if is_blocked_department or t.is_blocked %}disabled{% endif %}" {% if not (is_blocked_department or t.is_blocked) %}href="{{ url_for('counselor_test_send_page', test_id=t.id) }}"{% else %}onclick="return false;"{% endif %}>
                 <i class="fas fa-paper-plane"></i> Send Results
               </a>
             </div>
@@ -137,7 +139,9 @@
           <td>{{ t.section or '—' }}</td>
           <td>{{ total }}</td>
           <td>
-            {% if generated > 0 %}
+            {% if t.is_blocked %}
+            <span class="badge badge-danger">Blocked By Admin</span>
+            {% elif generated > 0 %}
             <span class="badge badge-success">Generated</span>
             {% else %}
             <span class="badge badge-warning">Pending</span>
@@ -145,13 +149,13 @@
           </td>
           <td>
             <div class="btn-group">
-              <a class="btn btn-outline btn-sm" href="{{ url_for('counselor_test_view_page', test_id=t.id) }}">
+              <a class="btn btn-outline btn-sm {% if is_blocked_department or t.is_blocked %}disabled{% endif %}" {% if not (is_blocked_department or t.is_blocked) %}href="{{ url_for('counselor_test_view_page', test_id=t.id) }}"{% else %}onclick="return false;"{% endif %}>
                 <i class="fas fa-eye"></i> View
               </a>
-              <button class="btn btn-outline btn-sm" onclick="openModal('test-edit-{{ t.id }}')" {% if is_blocked_department %}disabled{% endif %}>
+              <button class="btn btn-outline btn-sm" onclick="openModal('test-edit-{{ t.id }}')" {% if is_blocked_department or t.is_blocked %}disabled{% endif %}>
                 <i class="fas fa-pen"></i> Edit
               </button>
-              <a class="btn btn-primary btn-sm {% if is_blocked_department %}disabled{% endif %}" href="{{ url_for('counselor_test_send_page', test_id=t.id) }}">
+              <a class="btn btn-primary btn-sm {% if is_blocked_department or t.is_blocked %}disabled{% endif %}" {% if not (is_blocked_department or t.is_blocked) %}href="{{ url_for('counselor_test_send_page', test_id=t.id) }}"{% else %}onclick="return false;"{% endif %}>
                 <i class="fas fa-paper-plane"></i> Send Results
               </a>
             </div>

@@ -11,25 +11,41 @@ echo.
 :: Move to the folder where this .bat lives
 cd /d "%~dp0"
 
+:: Resolve virtual environment path (supports venv and .venv)
+set "PY_EXE="
+set "PIP_EXE="
+if exist "venv\Scripts\python.exe" (
+    set "PY_EXE=venv\Scripts\python.exe"
+    set "PIP_EXE=venv\Scripts\pip.exe"
+)
+if exist ".venv\Scripts\python.exe" (
+    set "PY_EXE=.venv\Scripts\python.exe"
+    set "PIP_EXE=.venv\Scripts\pip.exe"
+)
+
 :: Kill any old process on port 5000
 for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":5000" ^| findstr "LISTENING"') do (
     taskkill /F /PID %%a >nul 2>&1
 )
 
 :: Check venv exists
-if not exist "venv\Scripts\python.exe" (
+if "%PY_EXE%"=="" (
     echo  [ERROR] Virtual environment not found!
-    echo  Run:  python -m venv venv
+    echo  Run one of the following:
+    echo        python -m venv venv
     echo        venv\Scripts\pip install -r backend\requirements.txt
+    echo  OR
+    echo        python -m venv .venv
+    echo        .venv\Scripts\pip install -r backend\requirements.txt
     pause
     exit /b 1
 )
 
 :: Quick dependency check
-"venv\Scripts\python.exe" -c "import flask" 2>nul
+"%PY_EXE%" -c "import flask" 2>nul
 if errorlevel 1 (
     echo  Installing dependencies...
-    "venv\Scripts\pip.exe" install -r backend\requirements.txt
+    "%PIP_EXE%" install -r backend\requirements.txt
 )
 
 :: Start server
@@ -38,5 +54,5 @@ echo  Opening http://localhost:5000 in your browser...
 echo  Press Ctrl+C to stop the server.
 echo.
 start "" http://localhost:5000
-"venv\Scripts\python.exe" backend\app.py
+"%PY_EXE%" backend\app.py
 pause

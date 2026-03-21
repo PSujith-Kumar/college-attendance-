@@ -113,7 +113,22 @@ a:hover { color: var(--accent); }
 .sidebar-header {
   display: flex; align-items: center; flex-direction: column;
   padding: 16px 12px; border-bottom: 1px solid var(--border);
+  position: relative;
 }
+.sidebar-close {
+  display: none;
+  position: absolute;
+  right: 8px;
+  top: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-dim);
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.sidebar-close:hover { color: var(--text); }
 .logo-area { 
   display: flex; flex-direction: column; align-items: center; gap: 8px; 
   width: 100%;
@@ -614,10 +629,18 @@ body.light-theme .global-footer-banner-image {
   color: var(--text-dim);
   font-size: .76rem;
   font-weight: 600;
+  border: none;
+  background: transparent;
+  cursor: pointer;
 }
 
 .global-footer-link:hover {
   color: var(--text);
+}
+
+.global-footer-btn {
+  font-family: inherit;
+  padding: 0;
 }
 
 /* ============================================================
@@ -725,8 +748,17 @@ body.light-theme .login-banner-wrap {
   width: 90%; max-width: 560px; max-height: 90vh; overflow-y: auto;
   background: var(--bg-secondary); border: 1px solid var(--border);
   border-radius: var(--radius-lg); padding: 28px;
+  font-size: .92rem;
+  line-height: 1.45;
   box-shadow: 0 24px 48px rgba(0,0,0,.5);
   animation: modalIn .25s ease;
+}
+.modal .card {
+  line-height: 1.45;
+}
+.modal .card > div {
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 @keyframes modalIn { from { opacity: 0; transform: scale(.95); } }
 .modal-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
@@ -894,8 +926,27 @@ body.light-theme .login-banner-wrap {
    RESPONSIVE
    ============================================================ */
 @media (max-width: 768px) {
-  .sidebar { transform: translateX(-100%); width: var(--sidebar-w); }
+  .sidebar {
+    transform: translateX(-100%);
+    width: var(--sidebar-w);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    max-height: 100dvh;
+    overflow: hidden;
+    transition: transform var(--transition);
+  }
   .sidebar.open { transform: translateX(0); }
+  .sidebar-close { display: inline-flex; align-items: center; justify-content: center; }
+  .sidebar-header { padding: 10px 12px 8px; }
+  .logo-image { max-width: 156px; height: 92px; }
+  .sidebar-nav { overflow-y: auto; min-height: 0; }
+  .sidebar-footer {
+    position: sticky;
+    bottom: 0;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--border);
+    z-index: 2;
+  }
   .main-content { margin-left: 0; }
   .mobile-toggle { display: block; }
   .form-row { grid-template-columns: 1fr; }
