@@ -529,7 +529,13 @@ def admin():
     allowed_scopes = _get_actor_scope_pairs(actor_email, actor_role)
     users = db.get_scoped_users_for_admin(actor_email, actor_role)
     departments = db.get_departments_for_admin(actor_email, actor_role, active_only=False)
-    active_sessions = db.get_active_sessions() if _is_system_admin(actor_role) else []
+    active_sessions = db.get_active_sessions() if _is_admin_portal_user(actor_role) else []
+    # For chief admins, filter sessions to only show scoped users
+    if _is_chief_admin(actor_role):
+        scoped_emails = {u.get("email") for u in users}
+        active_sessions = [s for s in active_sessions if s.get("user_email") in scoped_emails]
+    # Create a set of emails with active sessions for status display
+    logged_in_users = {s.get("user_email") for s in active_sessions if s.get("is_active") and not s.get("forced_logout")}
     full_activity = db.get_counselor_activity_summary()
     activity = _filter_activity_for_actor(full_activity, actor_email, actor_role)
     format_settings = db.get_format_settings()
@@ -635,6 +641,7 @@ def admin():
         chief_scopes=chief_scopes,
         chief_scope_keys=chief_scope_keys,
         chief_scopes_by_email=chief_scopes_by_email,
+        logged_in_users=logged_in_users,
         is_system_admin=_is_system_admin(actor_role),
         is_chief_admin=_is_chief_admin(actor_role),
         app_config=app_config,
@@ -2704,5 +2711,5 @@ def serve_data(filename):
 if __name__ == "__main__":
     import sys
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
-    print(f"\n  ✅  RMKCET Parent Connect running at: http://localhost:{port}\n")
+    print(f"\n  [OK] RMKCET Parent Connect running at: http://localhost:{port}\n")
     app.run(debug=False, host="0.0.0.0", port=port, use_reloader=False)

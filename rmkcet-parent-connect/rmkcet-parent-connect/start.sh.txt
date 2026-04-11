@@ -1,0 +1,97 @@
+#!/bin/bash
+
+# RMKCET Parent Connect [cite: 1]
+echo -e "\033[0;32m" # Set color to green (similar to color 0A)
+echo "============================================"
+echo " RMKCET Parent Connect"
+echo " Starting server..." [cite: 1]
+echo "============================================"
+echo -e "\033[0m"
+
+# Move to the folder where this script lives [cite: 2]
+cd "$(dirname "$0")" [cite: 2]
+
+# Check if Python is installed [cite: 2]
+if ! command -v python3 &> /dev/null; then
+    echo " [ERROR] Python3 is not installed or not in PATH!" [cite: 2]
+    echo " Please install Python 3.8 or later." [cite: 2]
+    read -p "Press enter to exit..."
+    exit 1
+fi
+
+# Define virtual environment paths
+VENV_DIR=""
+PY_EXE=""
+
+# Check for existing virtual environment [cite: 2]
+# In Linux, the executables are in the 'bin' folder, not 'Scripts'
+if [ -f "venv/bin/python" ]; then
+    VENV_DIR="venv" [cite: 2]
+    PY_EXE="venv/bin/python" [cite: 2]
+    echo " [INFO] Found existing virtual environment: venv" [cite: 3]
+elif [ -f ".venv/bin/python" ]; then
+    VENV_DIR=".venv" [cite: 3]
+    PY_EXE=".venv/bin/python" [cite: 3]
+    echo " [INFO] Found existing virtual environment: .venv" [cite: 3]
+fi
+
+# If no virtual environment exists, create one [cite: 4]
+if [ -z "$PY_EXE" ]; then
+    echo " [INFO] Virtual environment not found. Creating one..." [cite: 4]
+    python3 -m venv venv [cite: 4]
+    if [ $? -ne 0 ]; then
+        echo " [ERROR] Failed to create virtual environment!" [cite: 4]
+        read -p "Press enter to exit..."
+        exit 1
+    fi
+    VENV_DIR="venv" [cite: 4]
+    PY_EXE="venv/bin/python" [cite: 4]
+    echo " [SUCCESS] Virtual environment created successfully!" [cite: 4]
+fi
+
+# Kill any old process on port 5000 
+echo " [INFO] Checking for existing processes on port 5000..." 
+PID=$(lsof -t -i:5000)
+if [ ! -z "$PID" ]; then
+    echo " [INFO] Killing process with PID: $PID" 
+    kill -9 $PID 
+fi
+
+# Install dependencies if requirements.txt exists [cite: 6]
+if [ -f "backend/requirements.txt" ]; then
+    echo " [INFO] Checking/Installing dependencies..." [cite: 6]
+    if ! "$PY_EXE" -c "import flask" 2>/dev/null; then
+        echo " [INFO] Installing dependencies from requirements.txt..." [cite: 6]
+        "$PY_EXE" -m pip install -r backend/requirements.txt [cite: 6]
+        if [ $? -ne 0 ]; then
+            echo " [ERROR] Failed to install dependencies!" [cite: 6]
+            read -p "Press enter to exit..."
+            exit 1
+        fi
+        echo " [SUCCESS] Dependencies installed successfully!" [cite: 6]
+    else
+        echo " [INFO] Dependencies already installed." [cite: 7]
+    fi
+else
+    echo " [WARNING] backend/requirements.txt not found. Skipping installation." [cite: 7]
+fi
+
+# Start server [cite: 8]
+echo ""
+echo "============================================" [cite: 8]
+echo " Server starting..." [cite: 8]
+echo " Access at http://localhost:5000" [cite: 8]
+echo " Press Ctrl+C to stop the server." [cite: 8]
+echo "============================================" 
+echo ""
+
+# On Linux, use 'xdg-open' to open the browser 
+xdg-open http://localhost:5000 2>/dev/null || echo " [INFO] Please open browser at http://localhost:5000"
+
+# Run the app 
+"$PY_EXE" backend/app.py
+
+# If the server stops 
+echo ""
+echo " Server has stopped." 
+read -p "Press enter to close..."

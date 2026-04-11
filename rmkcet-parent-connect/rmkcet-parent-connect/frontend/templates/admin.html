@@ -243,7 +243,8 @@
         {% endif %}
         {% set can_edit_user = is_system_admin or (is_chief_admin and ((u.role == 'counselor' and scope_key in chief_scope_keys) or (u.role == 'chief_admin' and chief_admin_has_overlap))) %}
         {% set can_manage_user = (is_system_admin and (u.role != 'admin' or u.email != current_user_email)) or (is_chief_admin and can_edit_user) %}
-        <tr class="user-row" data-user-name="{{ u.name|lower }}" data-user-name-display="{{ u.name }}" data-user-role="{{ u.role or 'counselor' }}" data-user-dept="{{ u.department or '' }}" data-user-status="{% if u.is_active and not u.is_locked %}active{% else %}inactive{% endif %}" data-user-created="{{ u.created_at or '' }}">
+        {% set user_status = 'active' if not u.is_locked else 'inactive' %}
+        <tr class="user-row" data-user-name="{{ u.name|lower }}" data-user-name-display="{{ u.name }}" data-user-role="{{ u.role or 'counselor' }}" data-user-dept="{{ u.department or '' }}" data-user-status="{{ user_status }}" data-user-created="{{ u.created_at or '' }}">
           <td>
             <strong>{{ u.name }}</strong>
           </td>
@@ -266,7 +267,7 @@
             {% endif %}
           </td>
           <td>
-            {% if u.is_active and not u.is_locked %}<span class="badge badge-success">Active</span>
+            {% if not u.is_locked %}<span class="badge badge-success">Active</span>
             {% else %}<span class="badge badge-danger">Inactive</span>{% endif %}
           </td>
           <td style="text-align:right;">
